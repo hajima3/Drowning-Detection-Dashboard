@@ -1,0 +1,9 @@
+# uploads/
+# This folder stores uploaded video files for detection
+# Created automatically by the application
+
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
