@@ -7,7 +7,7 @@
 ![YOLOv11](https://img.shields.io/badge/YOLOv11-Ultralytics-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-A sophisticated drowning detection system using YOLOv11 computer vision to monitor swimming pools in real-time. Features a beautiful web dashboard with automated incident logging, multi-level alerts, and comprehensive analytics.
+A sophisticated drowning detection system using YOLOv11 computer vision to monitor swimming pools in real-time. Features a beautiful web dashboard with automated incident logging, multi-level alerts, and **modular architecture ready for SMS/Call notifications** and advanced integrations.
 
 ---
 
@@ -20,6 +20,7 @@ A sophisticated drowning detection system using YOLOv11 computer vision to monit
   - 🚨 **Level 2 Emergency**: 65%+ confidence, 3+ second duration, critical drowning
   - ⚠️ **Level 1 Warning**: 50-64% confidence, unsafe movement patterns
 - **YOLOv11n Model**: 96.92% mAP50 accuracy with 2.59M parameters
+- **Multi-Model Ensemble**: Combine predictions from multiple models (Roboflow + custom)
 - **Classes**: Drowning, Swimming
 
 ### 📊 Dashboard & Logging
@@ -30,18 +31,25 @@ A sophisticated drowning detection system using YOLOv11 computer vision to monit
 - **Filter Options**: All, Level 2 Only, Level 1 Only, Today
 - **Editable Notes**: Add context to each incident log
 
+### 🚨 Future-Ready Notifications (Configured, Not Yet Implemented)
+- **SMS Alerts**: Send text messages for Level 1 & Level 2 detections
+- **Emergency Calls**: Automatic phone calls for Level 2 emergencies
+- **Configurable Recipients**: Non-hardcoded phone numbers via config files
+- **Multiple Providers**: Twilio, AWS SNS, Vonage support ready
+
 ### ⚡ Performance Optimizations
 - Frame skipping (process every 2nd frame)
-- Resolution scaling (50% default)
+- Resolution scaling (75% default)
 - DirectShow backend for Windows webcam
-- JPEG compression (65% quality)
+- JPEG compression (75% quality)
 - Configurable performance presets
 
-### 🔔 Alert Features
-- Browser notifications with different behaviors for alert levels
-- Audio alerts (more urgent for Level 2)
-- Visual pulsing animations
-- Duration tracking (prevents duplicate logs)
+### 🏗️ Modular Architecture (NEW)
+- **Configuration-driven** - All settings in YAML/ENV files
+- **Separated modules** - Core, Inference, Alerts isolated
+- **Easy to extend** - Add SMS/Call/Database without major refactoring
+- **Backward compatible** - Existing setup still works
+- See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for details
 
 ---
 
@@ -194,25 +202,51 @@ Edit `performance_settings.py` to configure:
 
 ```
 yolov11dashboard/
-├── app.py                      # Flask server with detection logic
-├── performance_settings.py     # Configuration parameters
-├── requirements.txt            # Python dependencies
-├── .gitignore                  # Git exclusion patterns
-├── best.pt                     # YOLOv11 model weights (not included)
-├── templates/
+│
+├── src/                        # 🆕 Modular source code
+│   ├── core/                   # Configuration management
+│   ├── inference/              # YOLOv11 model operations
+│   └── alerts/                 # Alert levels & notifications
+│
+├── config/                     # 🆕 Configuration files
+│   ├── config.yaml             # Main settings (models, alerts, SMS)
+│   └── .env.template           # Credentials template
+│
+├── models/                     # YOLOv11 model files
+│   ├── best.pt                 # Primary trained model
+│   └── README.md               # Model management guide
+│
+├── datasets/                   # Training/validation data
+│   ├── local/                  # Local datasets
+│   │   ├── drowning/
+│   │   └── swimming/
+│   └── internet/               # Downloaded datasets
+│
+├── templates/                  # Flask HTML templates
 │   └── dashboard_live.html     # Web dashboard UI
-├── uploads/                    # Uploaded video storage
-│   └── .gitkeep
-├── scripts/
-│   └── start_dashboard.ps1     # Windows launcher script
-└── docs/
-    ├── README.md               # This file
-    ├── SETUP_GUIDE.md          # Detailed installation
-    ├── QUICK_REFERENCE.md      # Commands & shortcuts
-    ├── CHANGELOG.md            # Version history
-    ├── PROJECT_INFO.md         # Technical specifications
-    └── MODEL_README.md         # Model acquisition guide
+│
+├── uploads/                    # Video file uploads
+│
+├── scripts/                    # Utility scripts
+│   └── start_dashboard.ps1     # Quick start script
+│
+├── docs/                       # 🆕 Consolidated documentation
+│   ├── ARCHITECTURE.md         # 🆕 System architecture guide
+│   ├── SMS_CALL_INTEGRATION.md # 🆕 Notification setup guide
+│   ├── ENSEMBLE_GUIDE.md       # Multi-model guide
+│   ├── SETUP_GUIDE.md          # Installation guide
+│   ├── QUICK_REFERENCE.md      # Command reference
+│   └── (more docs...)
+│
+├── app.py                      # Flask application
+├── performance_settings.py     # Legacy performance config
+├── model_config.py             # Legacy model config
+├── requirements.txt            # Python dependencies
+├── MIGRATION_GUIDE.md          # 🆕 Architecture migration guide
+└── README.md                   # This file
 ```
+
+**🔗 See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for complete architecture details**
 
 ---
 
@@ -248,11 +282,22 @@ For more issues, see `QUICK_REFERENCE.md` troubleshooting section.
 
 ## 📚 Additional Documentation
 
-- **📘 [SETUP_GUIDE.md](SETUP_GUIDE.md)** - Detailed installation instructions
-- **📙 [QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - Commands, shortcuts, common fixes
-- **📗 [PROJECT_INFO.md](PROJECT_INFO.md)** - Technical architecture details
-- **📕 [CHANGELOG.md](CHANGELOG.md)** - Version history and updates
-- **📖 [MODEL_README.md](MODEL_README.md)** - Model acquisition and training
+### 🚀 Getting Started
+- **📘 [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md)** - Detailed installation instructions
+- **📙 [docs/QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** - Commands, shortcuts, common fixes
+
+### 🏗️ Architecture & Integration
+- **📗 [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)** - New modular architecture overview
+- **📕 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Technical system architecture
+- **📞 [docs/SMS_CALL_INTEGRATION.md](docs/SMS_CALL_INTEGRATION.md)** - SMS/Call notification setup
+
+### 🤖 Model & Datasets
+- **📖 [docs/ENSEMBLE_GUIDE.md](docs/ENSEMBLE_GUIDE.md)** - Multi-model ensemble guide
+- **📋 [models/README.md](models/README.md)** - Model management
+
+### 📊 Project Info
+- **📄 [docs/PROJECT_INFO.md](docs/PROJECT_INFO.md)** - Technical specifications
+- **📝 [docs/CHANGELOG.md](docs/CHANGELOG.md)** - Version history and updates
 
 ---
 

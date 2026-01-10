@@ -1,0 +1,187 @@
+# YOLOv11 Drowning Detection System - Configuration
+# DO NOT COMMIT THIS FILE WITH REAL CREDENTIALS
+
+# ===========================================
+# MODEL CONFIGURATION
+# ===========================================
+MODEL:
+  # Primary model path (relative to project root)
+  PRIMARY_MODEL: "models/best.pt"
+  
+  # Enable ensemble mode (multiple models)
+  ENABLE_ENSEMBLE: false
+  
+  # Additional models for ensemble (when enabled)
+  ENSEMBLE_MODELS:
+    - "models/best.pt"
+    # - "models/roboflow_model.pt"
+    # - "models/custom_model.pt"
+  
+  # Ensemble strategy: average, max, vote, weighted
+  ENSEMBLE_STRATEGY: "average"
+  
+  # Model weights (for weighted strategy)
+  ENSEMBLE_WEIGHTS:
+    - 1.0
+    # - 0.5
+    # - 0.3
+  
+  # Confidence thresholds
+  DEFAULT_CONFIDENCE: 0.5
+  MIN_CONFIDENCE: 0.1
+  MAX_CONFIDENCE: 0.9
+
+# ===========================================
+# ALERT SYSTEM CONFIGURATION
+# ===========================================
+ALERTS:
+  # Alert Level 1 (Warning) thresholds
+  LEVEL_1:
+    MIN_CONFIDENCE: 0.50
+    MAX_CONFIDENCE: 0.64
+    DESCRIPTION: "Unsafe Movement - Monitoring Recommended"
+  
+  # Alert Level 2 (Emergency) thresholds
+  LEVEL_2:
+    MIN_CONFIDENCE: 0.65
+    CRITICAL_CONFIDENCE: 0.80  # Instant emergency
+    DURATION_THRESHOLD: 3.0    # Seconds of continuous detection
+    DESCRIPTION: "Drowning Emergency - Immediate Action Required"
+  
+  # Browser notifications
+  NOTIFICATIONS:
+    ENABLED: true
+    LEVEL_1_DISMISSIBLE: true
+    LEVEL_2_PERSISTENT: true
+
+# ===========================================
+# SMS/CALL NOTIFICATION (Future Integration)
+# ===========================================
+NOTIFICATIONS:
+  # Enable SMS/Call alerts (TO BE IMPLEMENTED)
+  SMS_ENABLED: false
+  CALL_ENABLED: false
+  
+  # Phone numbers (TO BE CONFIGURED)
+  # Format: E.164 format recommended (e.g., +1234567890)
+  SMS_RECIPIENT:
+    NUMBER: ""  # Add phone number here
+    NAME: ""    # Optional: recipient name
+  
+  # Emergency call number (TO BE CONFIGURED)
+  EMERGENCY_CALL:
+    NUMBER: ""  # Add authority/emergency number here
+    NAME: ""    # Optional: authority name (e.g., "Pool Security")
+  
+  # SMS Provider Configuration (TO BE CONFIGURED)
+  SMS_PROVIDER:
+    SERVICE: "twilio"  # Options: twilio, aws_sns, vonage
+    API_KEY: ""        # Provider API key
+    API_SECRET: ""     # Provider API secret
+    SENDER_ID: ""      # Sender phone number or ID
+  
+  # Call Provider Configuration (TO BE CONFIGURED)
+  CALL_PROVIDER:
+    SERVICE: "twilio"  # Options: twilio, vonage
+    API_KEY: ""        # Provider API key
+    API_SECRET: ""     # Provider API secret
+    CALLER_ID: ""      # Caller phone number
+  
+  # Message templates
+  MESSAGES:
+    SMS_LEVEL_1: "⚠️ Pool Alert: Unsafe movement detected. Confidence: {confidence}%. Time: {timestamp}. Please check."
+    SMS_LEVEL_2: "🚨 DROWNING EMERGENCY detected at pool! Confidence: {confidence}%. Duration: {duration}s. IMMEDIATE ACTION REQUIRED!"
+    CALL_MESSAGE: "Emergency drowning alert. Immediate response required at monitored pool location."
+
+# ===========================================
+# PERFORMANCE SETTINGS
+# ===========================================
+PERFORMANCE:
+  # Frame processing
+  PROCESS_EVERY_N_FRAMES: 2
+  SCALE_FACTOR: 0.75
+  JPEG_QUALITY: 75
+  
+  # Video settings
+  TARGET_FPS: 30
+  MAX_DISPLAY_WIDTH: 960
+  MAX_DISPLAY_HEIGHT: 540
+  
+  # Webcam optimization
+  WEBCAM_WIDTH: 640
+  WEBCAM_HEIGHT: 480
+  WEBCAM_FPS: 30
+  BUFFER_SIZE: 1
+
+# ===========================================
+# DATASET CONFIGURATION
+# ===========================================
+DATASETS:
+  # Local datasets path
+  LOCAL_PATH: "datasets/local"
+  
+  # Internet/downloaded datasets path
+  INTERNET_PATH: "datasets/internet"
+  
+  # Training data organization
+  TRAIN_PATH: "datasets/train"
+  VALID_PATH: "datasets/valid"
+  TEST_PATH: "datasets/test"
+  
+  # Roboflow integration (TO BE CONFIGURED)
+  ROBOFLOW:
+    API_KEY: ""      # Roboflow API key
+    WORKSPACE: ""    # Workspace name
+    PROJECT: ""      # Project name
+    VERSION: 1       # Dataset version
+
+# ===========================================
+# FLASK SERVER CONFIGURATION
+# ===========================================
+SERVER:
+  HOST: "0.0.0.0"
+  PORT: 5000
+  DEBUG: false
+  
+  # Upload settings
+  UPLOAD_FOLDER: "uploads"
+  MAX_CONTENT_LENGTH: 524288000  # 500MB in bytes
+  ALLOWED_EXTENSIONS:
+    - "mp4"
+    - "avi"
+    - "mov"
+    - "mkv"
+
+# ===========================================
+# LOGGING CONFIGURATION
+# ===========================================
+LOGGING:
+  # Log file paths
+  APP_LOG: "logs/app.log"
+  DETECTION_LOG: "logs/detections.log"
+  ALERT_LOG: "logs/alerts.log"
+  
+  # Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  LEVEL: "INFO"
+  
+  # Retention
+  MAX_LOG_SIZE_MB: 10
+  BACKUP_COUNT: 5
+
+# ===========================================
+# SECURITY (Future Integration)
+# ===========================================
+SECURITY:
+  # API authentication
+  API_KEY_ENABLED: false
+  API_KEY: ""  # Generate secure key when enabling
+  
+  # HTTPS/SSL
+  SSL_ENABLED: false
+  SSL_CERT: ""
+  SSL_KEY: ""
+  
+  # CORS settings
+  CORS_ENABLED: false
+  ALLOWED_ORIGINS:
+    - "http://localhost:5000"

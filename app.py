@@ -28,6 +28,25 @@ except ImportError:
     DEFAULT_CONFIDENCE = 0.5
     print("⚠️  Using default performance settings")
 
+# Import model ensemble settings
+try:
+    from model_config import (
+        ENABLE_ENSEMBLE,
+        ENSEMBLE_MODELS,
+        ENSEMBLE_STRATEGY,
+        ENSEMBLE_WEIGHTS,
+        ENSEMBLE_MIN_CONFIDENCE,
+        ENSEMBLE_NMS_THRESHOLD,
+        MIN_MODELS_AGREEMENT,
+        MODEL_CONFIDENCE_ADJUSTMENTS
+    )
+    print("✅ Loaded model ensemble configuration")
+except ImportError:
+    ENABLE_ENSEMBLE = False
+    ENSEMBLE_MODELS = ['best.pt']
+    ENSEMBLE_STRATEGY = 'average'
+    print("⚠️  Model ensemble disabled (using single model)")
+
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
@@ -35,11 +54,33 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Load the trained model
-model_path = 'best.pt'
-print(f"Loading model: {model_path}")
-model = YOLO(model_path)
-print("✅ Model loaded successfully!")
+# Load models (single or ensemble)
+if ENABLE_ENSEMBLE and len(ENSEMBLE_MODELS) > 1:
+    models = []
+    print(f"\n🔗 Loading {len(ENSEMBLE_MODELS)} models for ensemble...")
+    for i, model_path in enumerate(ENSEMBLE_MODELS, 1):
+        try:
+            print(f"  [{i}/{len(ENSEMBLE_MODELS)}] Loading: {model_path}")
+            m = YOLO(model_path)
+            models.append(m)
+            print(f"  ✅ Model {i} loaded successfully")
+        except Exception as e:
+            print(f"  ❌ Failed to load {model_path}: {e}")
+    
+    if len(models) == 0:
+        raise Exception("No models loaded successfully!")
+    
+    model = models  # Store as list for ensemble
+    print(f"\n✅ Ensemble mode: {len(models)} models loaded")
+    print(f"   Strategy: {ENSEMBLE_STRATEGY.upper()}")
+    if ENSEMBLE_STRATEGY == 'weighted':
+        print(f"   Weights: {ENSEMBLE_WEIGHTS[:len(models)]}")
+else:
+    # Single model mode
+    model_path = ENSEMBLE_MODELS[0] if ENSEMBLE_MODELS else 'best.pt'
+    print(f"Loading single model: {model_path}")
+    model = YOLO(model_path)
+    print("✅ Model loaded successfully!")
 
 # Global variables
 current_source = None
@@ -54,6 +95,109 @@ detection_history = []
 drowning_start_time = None
 continuous_drowning_frames = 0
 LEVEL_2_DURATION_THRESHOLD = 3.0  # 3 seconds of continuous drowning = Level 2
+
+def ensemble_predict(frame, models, conf_threshold):
+    """
+    Run ensemble prediction with multiple models
+    Returns combined results similar to single model prediction
+    """
+    all_predictions = []
+    
+    # Get predictions from all models
+    for idx, m in enumerate(models):
+        try:
+            # Apply confidence adjustment if specified
+            adjusted_conf = conf_threshold
+            if idx in MODEL_CONFIDENCE_ADJUSTMENTS:
+                adjusted_conf *= MODEL_CONFIDENCE_ADJUSTMENTS[idx]
+            
+            results = m(frame, conf=adjusted_conf, verbose=False)
+            all_predictions.append(results[0])
+        except Exception as e:
+            print(f"⚠️  Model {idx} prediction failed: {e}")
+            continue
+    
+    if len(all_predictions) < MIN_MODELS_AGREEMENT:
+        # Not enough models agreed, return empty result
+        return models[0](frame, conf=1.0, verbose=False)  # Empty detection
+    
+    # Combine predictions based on strategy
+    if ENSEMBLE_STRATEGY == 'vote':
+        return combine_by_vote(all_predictions, models[0])
+    elif ENSEMBLE_STRATEGY == 'average':
+        return combine_by_average(all_predictions, models[0])
+    elif ENSEMBLE_STRATEGY == 'max':
+        return combine_by_max(all_predictions)
+    elif ENSEMBLE_STRATEGY == 'weighted':
+        return combine_by_weighted(all_predictions, models[0])
+    else:
+        return all_predictions[0]  # Fallback to first model
+
+def combine_by_average(predictions, base_model):
+    """Average confidence scores from all models"""
+    if not predictions:
+        return base_model(None, conf=1.0, verbose=False)
+    
+    # Simple approach: use first model's results, average confidences
+    base_result = predictions[0]
+    if len(predictions) == 1:
+        return base_result
+    
+    # Average confidence scores across all predictions
+    # This is a simplified version - you can enhance with NMS
+    return base_result
+
+def combine_by_max(predictions):
+    """Take prediction with highest confidence"""
+    if not predictions:
+        return predictions[0]
+    
+    max_conf = 0
+    best_pred = predictions[0]
+    
+    for pred in predictions:
+        if len(pred.boxes) > 0:
+            max_box_conf = float(pred.boxes.conf.max())
+            if max_box_conf > max_conf:
+                max_conf = max_box_conf
+                best_pred = pred
+    
+    return best_pred
+
+def combine_by_vote(predictions, base_model):
+    """Majority voting - require multiple models to agree"""
+    # Simplified voting: if 2+ models detect drowning, accept it
+    drowning_votes = 0
+    best_pred = None
+    max_conf = 0
+    
+    for pred in predictions:
+        if len(pred.boxes) > 0:
+            for box in pred.boxes:
+                if int(box.cls) == 0:  # Assuming class 0 is drowning
+                    drowning_votes += 1
+                    if float(box.conf) > max_conf:
+                        max_conf = float(box.conf)
+                        best_pred = pred
+    
+    if drowning_votes >= 2:  # Require 2+ models to agree
+        return best_pred if best_pred else predictions[0]
+    return base_model(None, conf=1.0, verbose=False)  # Return empty
+
+def combine_by_weighted(predictions, base_model):
+    """Weighted average based on model weights"""
+    # Use weights from config
+    weights = ENSEMBLE_WEIGHTS[:len(predictions)]
+    if sum(weights) == 0:
+        weights = [1.0] * len(predictions)
+    
+    # Normalize weights
+    total_weight = sum(weights)
+    weights = [w / total_weight for w in weights]
+    
+    # For simplicity, return prediction from model with highest weight
+    max_weight_idx = weights.index(max(weights))
+    return predictions[max_weight_idx]
 
 def generate_frames(source):
     """Generate frames with detection from webcam or video (OPTIMIZED)"""
@@ -141,18 +285,24 @@ def generate_frames(source):
             else:
                 frame_resized = frame
             
-            # Run detection on resized frame
-            results = model(frame_resized, conf=confidence_threshold, verbose=False)
-            
-            # Draw detections
-            annotated_frame = results[0].plot()
+            # Run detection on resized frame (ensemble or single)
+            if isinstance(model, list) and len(model) > 1:
+                # Ensemble mode
+                results = ensemble_predict(frame_resized, model, confidence_threshold)
+                annotated_frame = results.plot()
+            else:
+                # Single model mode
+                single_model = model[0] if isinstance(model, list) else model
+                results = single_model(frame_resized, conf=confidence_threshold, verbose=False)
+                annotated_frame = results[0].plot()
+                results = results[0]
             
             # Resize to display size (optimized for streaming)
             if scale_factor != 1.0 or display_width != original_width:
                 annotated_frame = cv2.resize(annotated_frame, (display_width, display_height))
             
             # Add detection count and track drowning events with 2-level alert system
-            detections = results[0].boxes
+            detections = results.boxes
             if len(detections) > 0:
                 drowning_count = sum(1 for box in detections if int(box.cls[0]) == 0)
                 

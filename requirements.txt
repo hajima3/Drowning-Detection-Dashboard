@@ -1,13 +1,38 @@
-ultralytics
-opencv-python
-flask
-torch
-torchvision
-numpy
-matplotlib
-Pillow
-scipy
-pandas
-pyyaml
-requests
-tqdm
+# Core Dependencies
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+flask>=2.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+pyyaml>=6.0
+
+# Image Processing
+Pillow>=10.0.0
+
+# Data Processing  
+pandas>=2.0.0
+scipy>=1.11.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Utilities
+requests>=2.31.0
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+
+# Future SMS/Call Integration (commented out - install when needed)
+# twilio>=8.0.0              # For Twilio SMS/Call
+# boto3>=1.26.0              # For AWS SNS
+# vonage>=3.0.0              # For Vonage SMS/Call
+
+# Future Database (commented out - install when needed)
+# sqlalchemy>=2.0.0
+# psycopg2-binary>=2.9.0     # For PostgreSQL
+# pymongo>=4.5.0             # For MongoDB
+
+# Future API Security (commented out - install when needed)
+# flask-cors>=4.0.0
+# flask-limiter>=3.5.0
+# cryptography>=41.0.0
