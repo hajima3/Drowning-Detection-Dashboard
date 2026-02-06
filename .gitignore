@@ -44,6 +44,9 @@ Thumbs.db
 uploads/*
 !uploads/.gitkeep
 
+# Environment variables (sensitive credentials)
+.env
+
 # Model files
 best.pt
 yolo11n.pt

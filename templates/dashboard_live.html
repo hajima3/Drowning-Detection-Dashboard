@@ -386,6 +386,7 @@
                 </div>
             </div>
         </div>
+
     </div>
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
@@ -448,7 +449,7 @@
             if (tab === 'detection') {
                 document.getElementById('detectionTab').classList.add('active');
                 document.querySelector('[onclick="switchTab(\'detection\')"]').classList.add('active');
-            } else {
+            } else if (tab === 'logs') {
                 document.getElementById('logsTab').classList.add('active');
                 document.querySelector('[onclick="switchTab(\'logs\')"]').classList.add('active');
                 refreshLogs();
@@ -472,13 +473,6 @@
             localStorage.setItem('drowningLogs', JSON.stringify(incidentLogs));
             localStorage.setItem('logIdCounter', logIdCounter.toString());
             updateLogsDisplay();
-            
-            // Alert based on level
-            if (type.includes('Level 2')) {
-                showAlert('🚨 LEVEL 2 EMERGENCY DETECTED! Drowning incident logged. Contact medical authorities immediately!', 'error');
-            } else if (type.includes('Level 1')) {
-                showAlert('⚠️ LEVEL 1 WARNING DETECTED! Unsafe movement detected. Staff intervention recommended.', 'warning');
-            }
         }
 
         function updateLogsDisplay() {
@@ -627,9 +621,14 @@
                 const response = await fetch('/start_webcam', { method: 'POST' });
                 const data = await response.json();
                 if (data.status === 'success') {
-                    document.getElementById('videoContainer').innerHTML = '<img id="videoFeed" src="/video_feed">';
+                    // Force reload video feed with cache bust
+                    const timestamp = new Date().getTime();
+                    document.getElementById('videoContainer').innerHTML = `<img id="videoFeed" src="/video_feed?t=${timestamp}">`;
                     document.getElementById('statusIndicator').className = 'status-indicator active';
                     showAlert('✅ Webcam started!', 'success');
+                    
+                    // Stop any playing alert audio when switching source
+                    stopAlertSounds();
                     
                     // Start automatic detection polling
                     startDetectionPolling();
@@ -657,6 +656,9 @@
                     
                     // Stop automatic detection polling
                     stopDetectionPolling();
+
+                    // Stop any playing alert audio
+                    stopAlertSounds();
                 }
             } catch (error) {
                 showAlert('❌ Error: ' + error.message, 'error');
@@ -673,12 +675,20 @@
                     const response = await fetch('/upload_video', { method: 'POST', body: formData });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        document.getElementById('videoContainer').innerHTML = '<img id="videoFeed" src="/video_feed">';
+                        // Force reload video feed with cache bust
+                        const timestamp = new Date().getTime();
+                        document.getElementById('videoContainer').innerHTML = `<img id="videoFeed" src="/video_feed?t=${timestamp}">`;
                         document.getElementById('statusIndicator').className = 'status-indicator active';
                         showAlert('✅ Video uploaded!', 'success');
                         
+                        // Stop any playing alert audio when switching source
+                        stopAlertSounds();
+                        
                         // Start automatic detection polling
                         startDetectionPolling();
+                        
+                        // Reset the file input so the same file can be uploaded again
+                        input.value = '';
                     }
                 } catch (error) {
                     showAlert('❌ Error: ' + error.message, 'error');
@@ -699,23 +709,52 @@
 
         // Automatic detection polling and logging
         let detectionPollingInterval = null;
-        let alertAudio = null;
+        let level1Audio = null;
+        let level2Audio = null;
         
-        // Initialize alert sound
-        function initAlertSound() {
-            if (!alertAudio) {
-                alertAudio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIFmm98OScTgwOUKzn77llHAU7k9nyz3ksBC15yO/ekEALFF2z6OqnVRULRp/g8r5tIQYsg83y2Ik2CBZpvfDknE4MDlCs5++5ZRwFO5PZ8s95LAQtecjv3pBACxRds+jqp1UVCkaf4PK+bSEGLIPN8tiJNggWab3w5JxODA5QrOfvuWUcBTuT2fLPeSwELXnI796QQAsUXbPo6qdVFQpGn+DyvmwhBiyDzfLYiTYIFmm98OScTgwOUKzn77llHAU7k9nyz3ksBBuBzvLYiTcIGWi77eefTRAMUKfj8LZjHAY4kdfyzHksBS15yO/ekEALFF2z6OqnVRUKRp/g8r5sIQUrgs7y2Ik2CBVpvfDlnE4MDlCs5++5ZRwFOpPa8s95LAQsg83y2Ik2CBZpvfDknE4MDlCs5++5ZRwFO5PZ8s95LAQtecjv3pBACxRds+jqp1UVCkaf4PK+bSEFLIPN8tiJNggWab3w5JxODA5QrOfvuWUcBTuT2fLPeSwELXnI796QQAsUXbPo6qdVFQpGn+DyvmwhBSyDzfLYiTYIFmm98OScTgwOUKzn77llHAU7k9nyz3ksBFRds+jqp1UVCUAAAAA==');
+        // Initialize alert sounds
+        function initAlertSounds() {
+            if (!level1Audio) {
+                level1Audio = new Audio('/static/audio/level1.mp3');
+                level1Audio.volume = 0.7; // 70% volume for Level 1
+            }
+            if (!level2Audio) {
+                level2Audio = new Audio('/static/audio/level2.mp3');
+                level2Audio.volume = 1.0; // Full volume for Level 2 emergency
             }
         }
         
-        function playAlertSound() {
+        function playAlertSound(level) {
             try {
-                initAlertSound();
-                if (alertAudio) {
-                    alertAudio.play().catch(err => console.log('Audio play failed:', err));
+                initAlertSounds();
+                
+                if (level === 2 && level2Audio) {
+                    // Play Level 2 emergency sound
+                    level2Audio.currentTime = 0; // Reset to start
+                    level2Audio.play().catch(err => console.log('Level 2 audio play failed:', err));
+                } else if (level === 1 && level1Audio) {
+                    // Play Level 1 warning sound
+                    level1Audio.currentTime = 0; // Reset to start
+                    level1Audio.play().catch(err => console.log('Level 1 audio play failed:', err));
                 }
             } catch (error) {
                 console.log('Alert sound error:', error);
+            }
+        }
+        
+        // Stop any currently playing alert sounds
+        function stopAlertSounds() {
+            try {
+                if (level1Audio) {
+                    level1Audio.pause();
+                    level1Audio.currentTime = 0;
+                }
+                if (level2Audio) {
+                    level2Audio.pause();
+                    level2Audio.currentTime = 0;
+                }
+            } catch (error) {
+                console.log('Error stopping alert sounds:', error);
             }
         }
         
@@ -737,27 +776,31 @@
                         
                         // Determine alert type and response based on level
                         const isLevel2 = detection.level === 2;
-                        const alertType = isLevel2 ? 'error' : 'warning';
-                        const emoji = isLevel2 ? '🚨' : '⚠️';
-                        const title = isLevel2 ? 'LEVEL 2 EMERGENCY' : 'LEVEL 1 WARNING';
-                        const message = isLevel2 
-                            ? `Drowning emergency detected! Confidence: ${detection.confidence}%. Contact medical authorities immediately!`
-                            : `Unsafe movement detected! Confidence: ${detection.confidence}%. Staff intervention recommended.`;
                         
-                        // Show prominent alert
-                        showAlert(`${emoji} ${message}`, alertType);
-                        
-                        // Play alert sound (louder/more urgent for Level 2)
-                        playAlertSound();
-                        
-                        // Browser notification (if permitted)
-                        if ('Notification' in window && Notification.permission === 'granted') {
-                            new Notification(`${emoji} ${title}`, {
-                                body: message,
-                                icon: emoji,
-                                requireInteraction: isLevel2, // Only force interaction for Level 2
-                                tag: isLevel2 ? 'emergency' : 'warning'
-                            });
+                        // Play alert sound based on level (Level 1 or Level 2)
+                        if (detection.level === 1 || detection.level === 2) {
+                            playAlertSound(detection.level);
+                        }
+
+                        // For Level 2, also show prominent on-screen alert and browser notification
+                        if (isLevel2) {
+                            const alertType = 'error';
+                            const emoji = '🚨';
+                            const title = 'LEVEL 2 EMERGENCY';
+                            const message = `Drowning emergency detected! Confidence: ${detection.confidence}%. Contact medical authorities immediately!`;
+
+                            // Show prominent alert only for Level 2
+                            showAlert(`${emoji} ${message}`, alertType);
+
+                            // Browser notification (if permitted)
+                            if ('Notification' in window && Notification.permission === 'granted') {
+                                new Notification(`${emoji} ${title}`, {
+                                    body: message,
+                                    icon: emoji,
+                                    requireInteraction: true, // Force interaction for Level 2
+                                    tag: 'emergency'
+                                });
+                            }
                         }
                     });
                 }
