@@ -1,14 +1,14 @@
 {
-  "process_every_n_frames": 1,
+  "process_every_n_frames": 2,
   "scale_factor": 1.0,
   "jpeg_quality": 65,
   "default_confidence": 0.15,
   "level2_duration_threshold": 3.0,
   "target_fps": 30,
-  "yolo_imgsz": 640,
+  "yolo_imgsz": 416,
   "level1_min_conf": 0.0,
   "level2_min_conf": 0.0,
-  "augment": true,
+  "augment": false,
   "iou_threshold": 0.4,
   "model_files": [
     "best.pt",
