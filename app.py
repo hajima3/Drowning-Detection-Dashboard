@@ -19,27 +19,46 @@ import torch
 load_dotenv()
 
 # ======================== SETTINGS ========================
+# Central detection config (shared across machines, tracked in git)
+DETECTION_CONFIG_FILE = Path(__file__).parent / "detection_config.json"
+
+def load_detection_config():
+    try:
+        with open(DETECTION_CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_det_cfg = load_detection_config()
+
+def _cfg(name, default):
+    """Helper to read from env first, then detection_config.json, then default."""
+    env_val = os.getenv(name)
+    if env_val is not None:
+        return env_val
+    return str(_det_cfg.get(name.lower(), default))
+
 # Inference runs on EVERY frame (1). Raise to 2-3 if CPU is too slow.
-PROCESS_EVERY_N_FRAMES = int(os.getenv("PROCESS_EVERY_N_FRAMES", "1"))
+PROCESS_EVERY_N_FRAMES = int(_cfg("PROCESS_EVERY_N_FRAMES", 1))
 # Keep full resolution for inference so small/fast people aren't missed.
-SCALE_FACTOR = float(os.getenv("SCALE_FACTOR", "1.0"))
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "65"))                    # JPEG compression quality
+SCALE_FACTOR = float(_cfg("SCALE_FACTOR", 1.0))
+JPEG_QUALITY = int(_cfg("JPEG_QUALITY", 65))                    # JPEG compression quality
 # Lower confidence so borderline detections (0.25-0.5) still show up.
-DEFAULT_CONFIDENCE = float(os.getenv("DEFAULT_CONFIDENCE", "0.25"))
-LEVEL_2_DURATION_THRESHOLD = float(os.getenv("LEVEL_2_DURATION_THRESHOLD", "3.0"))
+DEFAULT_CONFIDENCE = float(_cfg("DEFAULT_CONFIDENCE", 0.25))
+LEVEL_2_DURATION_THRESHOLD = float(_cfg("LEVEL_2_DURATION_THRESHOLD", 3.0))
 
 # Optional strict-mode thresholds (per-level minimum confidence)
 # Example for very low false positives:
 #   LEVEL1_MIN_CONF=0.7
 #   LEVEL2_MIN_CONF=0.9
-LEVEL1_MIN_CONF = float(os.getenv("LEVEL1_MIN_CONF", "0.0"))
-LEVEL2_MIN_CONF = float(os.getenv("LEVEL2_MIN_CONF", "0.0"))
+LEVEL1_MIN_CONF = float(_cfg("LEVEL1_MIN_CONF", 0.0))
+LEVEL2_MIN_CONF = float(_cfg("LEVEL2_MIN_CONF", 0.0))
 
 # Performance / hardware overrides
-TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
+TARGET_FPS = float(_cfg("TARGET_FPS", 30))
 YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")  # auto | cpu | cuda:0 | 0
 # 640 matches what the model was trained at. Lower (320) is faster but less accurate.
-YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
+YOLO_IMGSZ = int(_cfg("YOLO_IMGSZ", 640))
 YOLO_HALF = os.getenv("YOLO_HALF", "auto")  # auto | true | false
 
 # ======================== FLASK APP ========================
