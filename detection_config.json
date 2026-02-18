@@ -1,11 +1,11 @@
 {
-  "process_every_n_frames": 2,
+  "process_every_n_frames": 3,
   "scale_factor": 1.0,
   "jpeg_quality": 65,
   "default_confidence": 0.15,
   "level2_duration_threshold": 3.0,
   "target_fps": 30,
-  "yolo_imgsz": 416,
+  "yolo_imgsz": 320,
   "level1_min_conf": 0.0,
   "level2_min_conf": 0.0,
   "augment": false,

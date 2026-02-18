@@ -14,6 +14,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 import torch
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file
 load_dotenv()
@@ -251,27 +252,42 @@ if metrics["iterations"]:
     print(f"📊 Best Model: Iteration {_best_m['iteration']} | F1: {_best_m['f1_score']}%")
 
 
-def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
-    """Run all ensemble models on frame, merge detections by majority vote.
+# Thread pool shared across frames — avoids per-frame thread creation overhead
+_ensemble_executor = ThreadPoolExecutor(max_workers=len(ensemble_models) if ensemble_models else 3)
 
-    Returns (annotated_frame, merged_boxes) where merged_boxes is a list of
-    dicts: {class_id, class_name, conf, alert_level, alert_name}.
-    Only boxes whose class_name appears in >= ENSEMBLE_MIN_VOTES model results
-    are kept.
+def _predict_single(m, frame, conf, imgsz, iou, augment, device, half):
+    """Run inference on one model — called in a thread."""
+    return m.predict(
+        frame,
+        conf=conf,
+        imgsz=imgsz,
+        iou=iou,
+        augment=augment,
+        device=device,
+        half=half,
+        verbose=False,
+    )[0]
+
+
+def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
+    """Run all ensemble models IN PARALLEL, merge detections by majority vote.
+
+    All models run simultaneously in threads so total time ≈ slowest single
+    model, not 3x slower.
+    Returns (annotated_frame, merged_boxes).
     """
-    all_results = []
-    for m in ensemble_models:
-        r = m.predict(
-            frame,
-            conf=conf,
-            imgsz=imgsz,
-            iou=iou,
-            augment=augment,
-            device=device,
-            half=half,
-            verbose=False,
-        )[0]
-        all_results.append(r)
+    futures = {
+        _ensemble_executor.submit(_predict_single, m, frame, conf, imgsz, iou, augment, device, half): i
+        for i, m in enumerate(ensemble_models)
+    }
+    all_results = [None] * len(ensemble_models)
+    for future in as_completed(futures):
+        idx = futures[future]
+        try:
+            all_results[idx] = future.result()
+        except Exception as e:
+            print(f"[ENSEMBLE] Model {idx} error: {e}")
+    all_results = [r for r in all_results if r is not None]
 
     # Annotate with the primary model's result
     annotated = all_results[0].plot()
