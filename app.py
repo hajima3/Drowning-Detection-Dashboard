@@ -188,23 +188,10 @@ def get_alert_level_for_class(class_name):
     # Default to Level 0 if class not found
     return 0, "Normal"
 
-# Load YOLOv11 model (trained in Label Studio)
-# MODEL REQUIREMENTS:
-# - Precision: Minimize false positives
-# - Recall: Detect all drowning cases  
-# - F1 Score: 95-98% target for production
-# - Export as 'best.pt' from Label Studio and place in root folder
-print("🔄 Loading YOLOv11 model...")
-model_path = os.getenv("MODEL_PATH")
-if model_path:
-    model_path = str(Path(model_path))
-else:
-    model_path = str(Path(__file__).parent / "best.pt")
-
+# ======================== DEVICE SETUP ========================
 if YOLO_DEVICE.lower() == "auto":
     yolo_device = 0 if torch.cuda.is_available() else "cpu"
 else:
-    # allow either integer device index or explicit string
     try:
         yolo_device = int(YOLO_DEVICE)
     except ValueError:
@@ -216,18 +203,109 @@ if str(YOLO_HALF).lower() in {"true", "1", "yes"}:
 elif str(YOLO_HALF).lower() == "auto":
     use_half = bool(torch.cuda.is_available())
 
-model = YOLO(model_path)
-try:
-    model.fuse()
-except Exception:
-    pass
-print("✅ Model loaded successfully!")
+# ======================== ENSEMBLE MODEL LOADING ========================
+# Load all model files listed in detection_config.json (or fall back to best.pt)
+# Ensemble: run all models on every frame; only fire an alert when
+# at least ensemble_min_votes models agree on the same class.
+
+ENSEMBLE_MIN_VOTES = int(_det_cfg.get("ensemble_min_votes", 1))
+
+def _load_models():
+    root = Path(__file__).parent
+    # Single model override via env var
+    env_path = os.getenv("MODEL_PATH")
+    if env_path:
+        paths = [str(Path(env_path))]
+    else:
+        configured = _det_cfg.get("model_files", ["best.pt"])
+        paths = [str(root / p) for p in configured if (root / p).exists()]
+        if not paths:
+            paths = [str(root / "best.pt")]
+
+    loaded = []
+    for p in paths:
+        print(f"🔄 Loading model: {p}")
+        try:
+            m = YOLO(p)
+            try:
+                m.fuse()
+            except Exception:
+                pass
+            loaded.append(m)
+            print(f"   ✅ Loaded: {Path(p).name}")
+        except Exception as e:
+            print(f"   ⚠️  Skipped {Path(p).name}: {e}")
+    if not loaded:
+        raise RuntimeError("No valid model files found. Place at least one .pt file in the project root.")
+    print(f"🏁 Ensemble ready: {len(loaded)} model(s), min_votes={ENSEMBLE_MIN_VOTES}")
+    return loaded
+
+ensemble_models = _load_models()
+# Primary model (first) used for annotated frame rendering
+model = ensemble_models[0]
 
 # Display current model metrics
 metrics = load_model_metrics()
 if metrics["iterations"]:
-    best = max(metrics["iterations"], key=lambda x: x.get("f1_score", 0))
-    print(f"📊 Best Model: Iteration {best['iteration']} | F1: {best['f1_score']}%")
+    _best_m = max(metrics["iterations"], key=lambda x: x.get("f1_score", 0))
+    print(f"📊 Best Model: Iteration {_best_m['iteration']} | F1: {_best_m['f1_score']}%")
+
+
+def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
+    """Run all ensemble models on frame, merge detections by majority vote.
+
+    Returns (annotated_frame, merged_boxes) where merged_boxes is a list of
+    dicts: {class_id, class_name, conf, alert_level, alert_name}.
+    Only boxes whose class_name appears in >= ENSEMBLE_MIN_VOTES model results
+    are kept.
+    """
+    all_results = []
+    for m in ensemble_models:
+        r = m.predict(
+            frame,
+            conf=conf,
+            imgsz=imgsz,
+            iou=iou,
+            augment=augment,
+            device=device,
+            half=half,
+            verbose=False,
+        )[0]
+        all_results.append(r)
+
+    # Annotate with the primary model's result
+    annotated = all_results[0].plot()
+
+    # Count how many models detected each class
+    votes = {}  # class_name -> list of conf scores
+    for r in all_results:
+        seen_in_this_model = set()
+        for box in r.boxes:
+            cid = int(box.cls[0])
+            try:
+                cname = r.names[cid]
+            except Exception:
+                cname = f"class_{cid}"
+            # One vote per class per model (use highest conf for that class)
+            if cname not in seen_in_this_model:
+                votes.setdefault(cname, []).append(float(box.conf[0]))
+                seen_in_this_model.add(cname)
+
+    # Keep only classes that reached the minimum vote threshold
+    merged = []
+    for cname, confs in votes.items():
+        if len(confs) >= ENSEMBLE_MIN_VOTES:
+            best_conf = max(confs)
+            alert_level, alert_name = get_alert_level_for_class(cname)
+            merged.append({
+                "class_name": cname,
+                "conf": best_conf,
+                "votes": len(confs),
+                "alert_level": alert_level,
+                "alert_name": alert_name,
+            })
+
+    return annotated, merged
 
 # ======================== GLOBAL VARIABLES ========================
 current_source = None
@@ -323,8 +401,8 @@ def generate_frames(source):
             else:
                 frame_resized = frame
             
-            # Run YOLOv11 detection
-            results = model.predict(
+            # Run ensemble detection (majority vote across all loaded models)
+            annotated_frame, merged_detections = ensemble_predict(
                 frame_resized,
                 conf=confidence_threshold,
                 imgsz=infer_imgsz,
@@ -332,57 +410,34 @@ def generate_frames(source):
                 augment=YOLO_AUGMENT,
                 device=yolo_device,
                 half=use_half,
-                verbose=False,
-            )[0]
-            annotated_frame = results.plot()
-            
+            )
+
             # Resize to display size
             if SCALE_FACTOR != 1.0 or display_width != original_width:
                 annotated_frame = cv2.resize(annotated_frame, (display_width, display_height))
-            
+
             # Process detections
-            detections = results.boxes
-            if len(detections) > 0:
+            if len(merged_detections) > 0:
                 # Debug: print every unique class seen (once per 30 frames to avoid spam)
                 if frame_count % 30 == 0:
-                    seen = []
-                    for _b in detections:
-                        _cid = int(_b.cls[0])
-                        _cn = model.names.get(_cid, f"class_{_cid}")
-                        _lv, _ = get_alert_level_for_class(_cn)
-                        seen.append(f"{_cn}({float(_b.conf[0]):.2f}→L{_lv})")
-                    print(f"[DETECT frame={frame_count}] {', '.join(seen)}")
+                    seen = [f"{d['class_name']}({d['conf']:.2f}→L{d['alert_level']} votes={d['votes']})" for d in merged_detections]
+                    print(f"[ENSEMBLE frame={frame_count}] {', '.join(seen)}")
 
-                # Track all detected classes and their alert levels
-                detected_classes = {}
+                # Pick highest alert level from ensemble-agreed detections
                 max_alert_level = 0
                 max_conf = 0
                 detected_class_name = "Unknown"
-                
-                for box in detections:
-                    class_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    
-                    # Get class name from model
-                    try:
-                        class_name = model.names[class_id]
-                    except Exception:
-                        class_name = f"class_{class_id}"
-                    
-                    # Determine alert level for this class
-                    alert_level, alert_name = get_alert_level_for_class(class_name)
-                    
-                    # Track highest alert level
+                detected_classes = {}
+
+                for d in merged_detections:
+                    alert_level = d["alert_level"]
+                    conf = d["conf"]
+                    class_name = d["class_name"]
                     if alert_level > max_alert_level or (alert_level == max_alert_level and conf > max_conf):
                         max_alert_level = alert_level
                         max_conf = conf
                         detected_class_name = class_name
-                    
-                    if class_name not in detected_classes:
-                        detected_classes[class_name] = {'level': alert_level, 'conf': conf, 'count': 1}
-                    else:
-                        detected_classes[class_name]['count'] += 1
-                        detected_classes[class_name]['conf'] = max(detected_classes[class_name]['conf'], conf)
+                    detected_classes[class_name] = {"level": alert_level, "conf": conf, "votes": d["votes"]}
                 
                 # Process based on highest alert level detected
                 if max_alert_level >= 1:  # Level 1 or Level 2
@@ -453,7 +508,7 @@ def generate_frames(source):
                             'confidence': conf_percentage,
                             'timestamp': current_time,
                             'class': detected_class_name,
-                            'count': len(detections),
+                            'count': len(merged_detections),
                             'duration': round(drowning_duration, 1) if drowning_duration > 0 else 0,
                             'reason': reason
                         }
