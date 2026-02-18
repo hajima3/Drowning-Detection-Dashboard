@@ -54,6 +54,11 @@ LEVEL_2_DURATION_THRESHOLD = float(_cfg("LEVEL_2_DURATION_THRESHOLD", 3.0))
 LEVEL1_MIN_CONF = float(_cfg("LEVEL1_MIN_CONF", 0.0))
 LEVEL2_MIN_CONF = float(_cfg("LEVEL2_MIN_CONF", 0.0))
 
+# Test-Time Augmentation: runs at multiple scales/flips — greatly improves recall
+YOLO_AUGMENT = str(_cfg("AUGMENT", True)).lower() in {"true", "1", "yes"}
+# NMS IoU threshold: lower = keep more overlapping boxes (fewer missed people)
+YOLO_IOU = float(_cfg("IOU_THRESHOLD", 0.4))
+
 # Performance / hardware overrides
 TARGET_FPS = float(_cfg("TARGET_FPS", 30))
 YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")  # auto | cpu | cuda:0 | 0
@@ -323,6 +328,8 @@ def generate_frames(source):
                 frame_resized,
                 conf=confidence_threshold,
                 imgsz=infer_imgsz,
+                iou=YOLO_IOU,
+                augment=YOLO_AUGMENT,
                 device=yolo_device,
                 half=use_half,
                 verbose=False,
