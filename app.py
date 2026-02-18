@@ -153,10 +153,17 @@ def send_telegram_alert(detection_event):
         print(f"[TELEGRAM] Error sending alert: {e}")
 
 def get_alert_level_for_class(class_name):
-    """Determine alert level based on detected class name.
+    """Map a detected class name to an alert level.
 
-    Supports both the detailed behavior classes in class_mapping.json and
-    simple base classes like "drowning" / "swimming" used in your current model.
+    3-level system:
+      Level 0 = Swimming  (safe, no action)
+      Level 1 = Risky     (monitor, ready to intervene)
+      Level 2 = Drowning  (immediate emergency)
+
+    Priority order:
+      1. Direct model output labels (fast path — no JSON lookup needed)
+      2. class_mapping.json lookup (covers all named sub-classes)
+      3. Default to Level 0 if unknown
     """
 
     def normalize_label(label: str) -> str:
@@ -168,26 +175,46 @@ def get_alert_level_for_class(class_name):
 
     name_key = normalize_label(class_name)
 
-    # Fallbacks for current 2-class model
-    if name_key in {"drowning", "drown", "drowning_person"}:
-        return 2, "Critical Drowning"
-    if name_key in {"swimming", "swimmer", "normal_swimming"}:
-        return 0, "Normal Behavior"
+    # ---- Level 2: Drowning (check first — most critical) ----
+    if name_key in {
+        "drowning", "drown", "drowning_person", "level2_critical",
+        "descending_depth", "distress_signs", "erratic_splashing",
+        "only_limbs_visible", "physical_collapse"
+    }:
+        return 2, "Drowning"
 
-    # If no mapping file loaded, treat as normal
-    if not class_mapping:
-        return 0, "Normal"
+    # ---- Level 1: Risky ----
+    if name_key in {
+        "risky", "level1_unsafe", "unsafe", "warning",
+        "erratic_unstable_pool_movement",
+        "improper_advanced_coordinated_swimming",
+        "improper_horizontal_stroke", "improper_movement",
+        "improper_swim_wear", "improper_vertical_swimming",
+        "unsafe_diving_and_pool_entry"
+    }:
+        return 1, "Risky"
 
-    # Check explicit mappings from class_mapping.json
-    for level_key, level_data in class_mapping['alert_levels'].items():
-        level_classes = level_data.get('classes', [])
-        normalized_classes = {normalize_label(c) for c in level_classes}
-        if name_key in normalized_classes:
-            level_num = int(level_key.split('_')[1])
-            return level_num, level_data.get('name', 'Alert')
+    # ---- Level 0: Swimming ----
+    if name_key in {
+        "swimming", "swimmer", "normal_swimming", "level0_safe", "safe",
+        "back_float", "backstroke", "breaststroke", "butterfly", "dog_paddle",
+        "freestyle", "side_stroke", "treading_water", "underwater_swimming",
+        "vertical_rest", "entering_pool_behavior",
+        "movements_allowed_outside_pool", "proper_swim_wear"
+    }:
+        return 0, "Swimming"
 
-    # Default to Level 0 if class not found
-    return 0, "Normal"
+    # ---- Fallback: check class_mapping.json ----
+    if class_mapping:
+        for level_key, level_data in class_mapping['alert_levels'].items():
+            level_classes = level_data.get('classes', [])
+            normalized_classes = {normalize_label(c) for c in level_classes}
+            if name_key in normalized_classes:
+                level_num = int(level_key.split('_')[1])
+                return level_num, level_data.get('name', 'Alert')
+
+    # Unknown class — default to Swimming (Level 0)
+    return 0, "Swimming"
 
 # ======================== DEVICE SETUP ========================
 if YOLO_DEVICE.lower() == "auto":
@@ -529,19 +556,19 @@ def generate_frames(source):
                     # Set alert type and reason with duration-based Level 2 escalation
                     if effective_level == 2 and drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
                         alert_level = 2
-                        alert_type = 'Level 2 - Critical Drowning'
+                        alert_type = 'Level 2 - Drowning'
                         reason = f'{detected_class_name} detected for {drowning_duration:.1f}s'
                     elif effective_level == 2:
-                        # Treat short Level 2 detections as Level 1 warnings
+                        # Treat short Level 2 detections as Level 1 Risky warnings
                         alert_level = 1
-                        alert_type = 'Level 1 - Possible Drowning'
+                        alert_type = 'Level 1 - Risky'
                         reason = (
                             f'{detected_class_name} detected for {drowning_duration:.1f}s '
                             f'(< {LEVEL_2_DURATION_THRESHOLD:.1f}s threshold)'
                         )
                     else:
                         alert_level = 1
-                        alert_type = 'Level 1 - Unsafe Movement'
+                        alert_type = 'Level 1 - Risky'
                         reason = f'{detected_class_name} detected'
                     
                     # Log detection (avoid duplicates within 2 seconds)
@@ -579,12 +606,12 @@ def generate_frames(source):
                     
                     if alert_level == 2:
                         color = (0, 0, 255)  # Red
-                        label = f'🚨 LEVEL 2 EMERGENCY: {detected_class_name}'
+                        label = f'DROWNING EMERGENCY: {detected_class_name}'
                         if drowning_duration > 0:
                             label += f' | {drowning_duration:.1f}s'
                     else:
                         color = (0, 165, 255)  # Orange
-                        label = f'⚠ LEVEL 1 WARNING: {detected_class_name}'
+                        label = f'RISKY: {detected_class_name}'
                     
                     rect_width = int(650 * text_scale)
                     rect_height = int(65 * text_scale)

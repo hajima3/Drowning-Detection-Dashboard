@@ -1,10 +1,11 @@
 {
   "alert_levels": {
     "level_0": {
-      "name": "Safe Swimming",
-      "description": "Safe swimming and permitted pool behavior",
+      "name": "Swimming",
+      "description": "Normal swimming — safe, no action needed",
       "color": "#00ff88",
       "classes": [
+        "Swimming",
         "Level0_Safe",
         "Back Float",
         "Backstroke",
@@ -22,10 +23,11 @@
       ]
     },
     "level_1": {
-      "name": "Unsafe / Improper Swimming",
-      "description": "Unsafe behavior requiring monitoring",
+      "name": "Risky",
+      "description": "Risky behavior — monitor and be ready to intervene",
       "color": "#ffa500",
       "classes": [
+        "Risky",
         "Level1_Unsafe",
         "Erratic / Unstable Pool Movement",
         "Improper Advanced / Coordinated Swimming",
@@ -37,10 +39,11 @@
       ]
     },
     "level_2": {
-      "name": "Critical Drowning Emergency",
-      "description": "Immediate life-threatening situation",
+      "name": "Drowning",
+      "description": "Drowning — immediate emergency response required",
       "color": "#ff0000",
       "classes": [
+        "Drowning",
         "Level2_Critical",
         "Descending Depth",
         "Distress Signs",
@@ -51,36 +54,36 @@
     }
   },
   "class_descriptions": {
-    "Level0_Safe": "Safe swimming / permitted pool behavior",
-    "Level1_Unsafe": "Unsafe/improper swimming requiring monitoring",
-    "Level2_Critical": "Critical drowning emergency",
-
-    "Back Float": "Floating on back",
-    "Backstroke": "Backstroke swimming",
-    "Breaststroke": "Breaststroke swimming",
-    "Butterfly": "Butterfly swimming",
-    "Dog Paddle": "Dog paddle swimming",
-    "Entering Pool Behavior": "Entering the pool",
-    "Freestyle": "Freestyle swimming",
-    "Movements Allowed Outside Pool": "Permitted movement outside pool",
-    "Proper Swim Wear": "Proper swim attire",
-    "Side Stroke": "Side stroke swimming",
-    "Treading Water": "Treading water",
-    "Underwater Swimming": "Swimming underwater",
-    "Vertical Rest": "Vertical rest in water",
-
-    "Erratic / Unstable Pool Movement": "Erratic or unstable movement in pool",
-    "Improper Advanced / Coordinated Swimming": "Improper coordinated swimming technique",
-    "Improper Horizontal Stroke": "Improper horizontal stroke technique",
-    "Improper Movement": "Improper movement",
-    "Improper Swim Wear": "Improper swim attire",
-    "Improper Vertical Swimming": "Improper vertical swimming",
-    "Unsafe Diving And Pool Entry": "Unsafe diving or pool entry",
-
-    "Descending Depth": "Descending in depth (sinking)",
-    "Distress Signs": "Visible distress signs",
-    "Erratic Splashing": "Erratic splashing indicating distress",
-    "Only Limbs Visible": "Only limbs visible above water",
-    "Physical Collapse": "Physical collapse"
+    "Swimming":                                   "Normal swimming — safe behavior",
+    "Risky":                                      "Risky behavior requiring monitoring",
+    "Drowning":                                   "Drowning — immediate emergency",
+    "Level0_Safe":                                "Safe swimming / permitted pool behavior",
+    "Level1_Unsafe":                              "Unsafe/improper swimming requiring monitoring",
+    "Level2_Critical":                            "Critical drowning emergency",
+    "Back Float":                                 "Floating on back",
+    "Backstroke":                                 "Backstroke swimming",
+    "Breaststroke":                               "Breaststroke swimming",
+    "Butterfly":                                  "Butterfly swimming",
+    "Dog Paddle":                                 "Dog paddle swimming",
+    "Entering Pool Behavior":                     "Entering the pool",
+    "Freestyle":                                  "Freestyle swimming",
+    "Movements Allowed Outside Pool":             "Permitted movement outside pool",
+    "Proper Swim Wear":                           "Proper swim attire",
+    "Side Stroke":                                "Side stroke swimming",
+    "Treading Water":                             "Treading water",
+    "Underwater Swimming":                        "Swimming underwater",
+    "Vertical Rest":                              "Vertical rest in water",
+    "Erratic / Unstable Pool Movement":           "Erratic or unstable movement in pool",
+    "Improper Advanced / Coordinated Swimming":   "Improper coordinated swimming technique",
+    "Improper Horizontal Stroke":                 "Improper horizontal stroke technique",
+    "Improper Movement":                          "Improper movement",
+    "Improper Swim Wear":                         "Improper swim attire",
+    "Improper Vertical Swimming":                 "Improper vertical swimming",
+    "Unsafe Diving And Pool Entry":               "Unsafe diving or pool entry",
+    "Descending Depth":                           "Descending in depth (sinking)",
+    "Distress Signs":                             "Visible distress signs",
+    "Erratic Splashing":                          "Erratic splashing indicating distress",
+    "Only Limbs Visible":                         "Only limbs visible above water",
+    "Physical Collapse":                          "Physical collapse"
   }
 }
