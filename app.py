@@ -255,6 +255,11 @@ if metrics["iterations"]:
 # Thread pool shared across frames — avoids per-frame thread creation overhead
 _ensemble_executor = ThreadPoolExecutor(max_workers=len(ensemble_models) if ensemble_models else 3)
 
+# Cascade mode: run only the primary model on every frame.
+# Only call secondary models when the primary already flags a suspicious class.
+# This cuts inference cost to ~1 model on calm/empty frames (the majority).
+USE_CASCADE = str(_cfg("CASCADE_MODE", True)).lower() in {"true", "1", "yes"}
+
 def _predict_single(m, frame, conf, imgsz, iou, augment, device, half):
     """Run inference on one model — called in a thread."""
     return m.predict(
@@ -269,25 +274,58 @@ def _predict_single(m, frame, conf, imgsz, iou, augment, device, half):
     )[0]
 
 
-def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
-    """Run all ensemble models IN PARALLEL, merge detections by majority vote.
+def _has_alert(result):
+    """Return True if a result contains any Level 1 or Level 2 detection."""
+    for box in result.boxes:
+        cid = int(box.cls[0])
+        try:
+            cname = result.names[cid]
+        except Exception:
+            cname = f"class_{cid}"
+        level, _ = get_alert_level_for_class(cname)
+        if level >= 1:
+            return True
+    return False
 
-    All models run simultaneously in threads so total time ≈ slowest single
-    model, not 3x slower.
+
+def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
+    """Cascade ensemble predict.
+
+    Step 1 — Run only the primary (fastest) model.
+    Step 2 — If it sees nothing suspicious, return immediately (1-model cost).
+    Step 3 — Only if primary flags something, run secondary models in parallel
+             and apply majority vote.
+
     Returns (annotated_frame, merged_boxes).
     """
-    futures = {
-        _ensemble_executor.submit(_predict_single, m, frame, conf, imgsz, iou, augment, device, half): i
-        for i, m in enumerate(ensemble_models)
-    }
-    all_results = [None] * len(ensemble_models)
-    for future in as_completed(futures):
-        idx = futures[future]
-        try:
-            all_results[idx] = future.result()
-        except Exception as e:
-            print(f"[ENSEMBLE] Model {idx} error: {e}")
-    all_results = [r for r in all_results if r is not None]
+    primary_result = _predict_single(
+        ensemble_models[0], frame, conf, imgsz, iou, augment, device, half
+    )
+    annotated = primary_result.plot()
+
+    # Fast path: nothing suspicious seen by primary — skip secondary models
+    if USE_CASCADE and len(ensemble_models) > 1 and not _has_alert(primary_result):
+        return annotated, []
+
+    # Slow path: primary flagged something — run secondary models in parallel
+    if len(ensemble_models) > 1:
+        all_results = [primary_result]
+        futures = {
+            _ensemble_executor.submit(
+                _predict_single, m, frame, conf, imgsz, iou, augment, device, half
+            ): i + 1
+            for i, m in enumerate(ensemble_models[1:])
+        }
+        secondary = [None] * len(futures)
+        for future in as_completed(futures):
+            idx = futures[future] - 1
+            try:
+                secondary[idx] = future.result()
+            except Exception as e:
+                print(f"[ENSEMBLE] Secondary model error: {e}")
+        all_results += [r for r in secondary if r is not None]
+    else:
+        all_results = [primary_result]
 
     # Annotate with the primary model's result
     annotated = all_results[0].plot()

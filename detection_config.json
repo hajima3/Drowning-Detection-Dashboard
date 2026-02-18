@@ -10,6 +10,7 @@
   "level2_min_conf": 0.0,
   "augment": false,
   "iou_threshold": 0.4,
+  "cascade_mode": true,
   "model_files": [
     "best.pt",
     "best_v2.pt",
