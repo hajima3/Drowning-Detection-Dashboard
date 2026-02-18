@@ -13,8 +13,7 @@
   "cascade_mode": false,
   "model_files": [
     "best_v2.pt",
-    "best_v3.pt",
-    "best.pt"
+    "best_v3.pt"
   ],
   "ensemble_min_votes": 2
 }
