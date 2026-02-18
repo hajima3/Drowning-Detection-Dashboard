@@ -8,12 +8,6 @@
   "yolo_imgsz": 640,
   "level1_min_conf": 0.0,
   "level2_min_conf": 0.0,
-  "augment": false,
   "iou_threshold": 0.4,
-  "cascade_mode": false,
-  "model_files": [
-    "best_v2.pt",
-    "best_v3.pt"
-  ],
-  "ensemble_min_votes": 2
+  "model_files": ["best.pt"]
 }

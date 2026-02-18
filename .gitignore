@@ -47,10 +47,9 @@ uploads/*
 # Environment variables (sensitive credentials)
 .env
 
-# Model files — only track the versioned ensemble models
-# When the final 3-class model is ready, add it here (e.g. !best_final.pt)
-!best_v2.pt
-!best_v3.pt
+# Model files — only track the final trained model
+# Place your trained 3-class model as best.pt in the project root
+!best.pt
 yolo11n.pt
 *.pt
 *.weights
