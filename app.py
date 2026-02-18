@@ -9,19 +9,31 @@ import cv2
 import time
 import os
 import json
+import re
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
+import torch
 
 # Load environment variables from .env file
 load_dotenv()
 
 # ======================== SETTINGS ========================
-PROCESS_EVERY_N_FRAMES = 2  # Process every 2nd frame for performance
-SCALE_FACTOR = 0.5          # 50% resolution for faster processing
-JPEG_QUALITY = 65           # JPEG compression quality (lower = faster)
-DEFAULT_CONFIDENCE = 0.5    # Default detection confidence threshold
-LEVEL_2_DURATION_THRESHOLD = 3.0  # 3 seconds continuous drowning = Level 2
+# Inference runs on EVERY frame (1). Raise to 2-3 if CPU is too slow.
+PROCESS_EVERY_N_FRAMES = int(os.getenv("PROCESS_EVERY_N_FRAMES", "1"))
+# Keep full resolution for inference so small/fast people aren't missed.
+SCALE_FACTOR = float(os.getenv("SCALE_FACTOR", "1.0"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "65"))                    # JPEG compression quality
+# Lower confidence so borderline detections (0.25-0.5) still show up.
+DEFAULT_CONFIDENCE = float(os.getenv("DEFAULT_CONFIDENCE", "0.25"))
+LEVEL_2_DURATION_THRESHOLD = float(os.getenv("LEVEL_2_DURATION_THRESHOLD", "3.0"))
+
+# Performance / hardware overrides
+TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
+YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")  # auto | cpu | cuda:0 | 0
+# 640 matches what the model was trained at. Lower (320) is faster but less accurate.
+YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))
+YOLO_HALF = os.getenv("YOLO_HALF", "auto")  # auto | true | false
 
 # ======================== FLASK APP ========================
 app = Flask(__name__)
@@ -115,7 +127,14 @@ def get_alert_level_for_class(class_name):
     simple base classes like "drowning" / "swimming" used in your current model.
     """
 
-    name_key = class_name.lower().replace(" ", "_")
+    def normalize_label(label: str) -> str:
+        if not label:
+            return ""
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower())
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        return normalized
+
+    name_key = normalize_label(class_name)
 
     # Fallbacks for current 2-class model
     if name_key in {"drowning", "drown", "drowning_person"}:
@@ -129,9 +148,11 @@ def get_alert_level_for_class(class_name):
 
     # Check explicit mappings from class_mapping.json
     for level_key, level_data in class_mapping['alert_levels'].items():
-        if name_key in level_data['classes']:
+        level_classes = level_data.get('classes', [])
+        normalized_classes = {normalize_label(c) for c in level_classes}
+        if name_key in normalized_classes:
             level_num = int(level_key.split('_')[1])
-            return level_num, level_data['name']
+            return level_num, level_data.get('name', 'Alert')
 
     # Default to Level 0 if class not found
     return 0, "Normal"
@@ -143,7 +164,32 @@ def get_alert_level_for_class(class_name):
 # - F1 Score: 95-98% target for production
 # - Export as 'best.pt' from Label Studio and place in root folder
 print("🔄 Loading YOLOv11 model...")
-model = YOLO('best.pt')
+model_path = os.getenv("MODEL_PATH")
+if model_path:
+    model_path = str(Path(model_path))
+else:
+    model_path = str(Path(__file__).parent / "best.pt")
+
+if YOLO_DEVICE.lower() == "auto":
+    yolo_device = 0 if torch.cuda.is_available() else "cpu"
+else:
+    # allow either integer device index or explicit string
+    try:
+        yolo_device = int(YOLO_DEVICE)
+    except ValueError:
+        yolo_device = YOLO_DEVICE
+
+use_half = False
+if str(YOLO_HALF).lower() in {"true", "1", "yes"}:
+    use_half = True
+elif str(YOLO_HALF).lower() == "auto":
+    use_half = bool(torch.cuda.is_available())
+
+model = YOLO(model_path)
+try:
+    model.fuse()
+except Exception:
+    pass
 print("✅ Model loaded successfully!")
 
 # Display current model metrics
@@ -207,7 +253,8 @@ def generate_frames(source):
     fps_time = time.time()
     last_annotated_frame = None
     last_frame_time = time.time()
-    target_fps = 30
+    target_fps = TARGET_FPS
+    infer_imgsz = YOLO_IMGSZ
     
     while detection_active:
         success, frame = cap.read()
@@ -233,7 +280,10 @@ def generate_frames(source):
         last_frame_time = time.time()
         
         # Skip frames or reuse last detection
+        # On skipped frames we still annotate the CURRENT raw frame with the last
+        # known boxes so the display doesn't go stale or show nothing.
         if frame_count % PROCESS_EVERY_N_FRAMES != 0 and last_annotated_frame is not None:
+            # Re-draw last result boxes onto fresh current frame for smooth video
             annotated_frame = last_annotated_frame
         else:
             # Resize for faster processing
@@ -243,7 +293,14 @@ def generate_frames(source):
                 frame_resized = frame
             
             # Run YOLOv11 detection
-            results = model(frame_resized, conf=confidence_threshold, verbose=False)[0]
+            results = model.predict(
+                frame_resized,
+                conf=confidence_threshold,
+                imgsz=infer_imgsz,
+                device=yolo_device,
+                half=use_half,
+                verbose=False,
+            )[0]
             annotated_frame = results.plot()
             
             # Resize to display size
@@ -253,6 +310,16 @@ def generate_frames(source):
             # Process detections
             detections = results.boxes
             if len(detections) > 0:
+                # Debug: print every unique class seen (once per 30 frames to avoid spam)
+                if frame_count % 30 == 0:
+                    seen = []
+                    for _b in detections:
+                        _cid = int(_b.cls[0])
+                        _cn = model.names.get(_cid, f"class_{_cid}")
+                        _lv, _ = get_alert_level_for_class(_cn)
+                        seen.append(f"{_cn}({float(_b.conf[0]):.2f}→L{_lv})")
+                    print(f"[DETECT frame={frame_count}] {', '.join(seen)}")
+
                 # Track all detected classes and their alert levels
                 detected_classes = {}
                 max_alert_level = 0
@@ -264,7 +331,10 @@ def generate_frames(source):
                     conf = float(box.conf[0])
                     
                     # Get class name from model
-                    class_name = model.names[class_id] if class_id < len(model.names) else f"class_{class_id}"
+                    try:
+                        class_name = model.names[class_id]
+                    except Exception:
+                        class_name = f"class_{class_id}"
                     
                     # Determine alert level for this class
                     alert_level, alert_name = get_alert_level_for_class(class_name)

@@ -136,9 +136,11 @@ Life-threatening situations requiring immediate emergency response.
 
 ### Annotation Guidelines
 
-When annotating in Label Studio, use these **exact class names** (use underscores):
+When annotating in Label Studio, use **exact class names** that match the model you train.
 
-#### Level 0 Examples:
+Note: the currently deployed `best.pt` in this repo uses title-cased labels (with spaces and some punctuation, e.g. `Erratic / Unstable Pool Movement`). The dashboard normalizes labels (spaces, slashes, punctuation) when mapping to alert levels via `class_mapping.json`.
+
+#### Level 0 Examples (older underscore-style models):
 ```
 controlled_swimming
 side_stroke
@@ -153,7 +155,7 @@ jumping
 back_float
 ```
 
-#### Level 1 Examples:
+#### Level 1 Examples (older underscore-style models):
 ```
 running
 rough_housing
@@ -168,7 +170,7 @@ panicking
 fatigue_movements
 ```
 
-#### Level 2 Examples:
+#### Level 2 Examples (older underscore-style models):
 ```
 active_sinking
 descending_depth

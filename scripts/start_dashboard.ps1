@@ -97,7 +97,7 @@ if (Test-Path ".\best.pt") {
 } else {
     Write-ColorOutput Red "✗ Model file 'best.pt' not found!"
     Write-ColorOutput Yellow "Please download or train the model file and place it in the project root."
-    Write-ColorOutput Yellow "See MODEL_README.md for instructions."
+    Write-ColorOutput Yellow "See MODEL_DEPLOYMENT.md for instructions."
     Write-Output ""
     $continue = Read-Host "Continue anyway? (will use base YOLO model) [y/N]"
     if ($continue -ne "y" -and $continue -ne "Y") {
