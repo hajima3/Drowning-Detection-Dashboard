@@ -1,5 +1,5 @@
 {
-  "process_every_n_frames": 3,
+  "process_every_n_frames": 2,
   "scale_factor": 1.0,
   "jpeg_quality": 65,
   "default_confidence": 0.15,
@@ -12,9 +12,9 @@
   "iou_threshold": 0.4,
   "cascade_mode": true,
   "model_files": [
-    "best.pt",
     "best_v2.pt",
-    "best_v3.pt"
+    "best_v3.pt",
+    "best.pt"
   ],
   "ensemble_min_votes": 2
 }

@@ -275,17 +275,14 @@ def _predict_single(m, frame, conf, imgsz, iou, augment, device, half):
 
 
 def _has_alert(result):
-    """Return True if a result contains any Level 1 or Level 2 detection."""
-    for box in result.boxes:
-        cid = int(box.cls[0])
-        try:
-            cname = result.names[cid]
-        except Exception:
-            cname = f"class_{cid}"
-        level, _ = get_alert_level_for_class(cname)
-        if level >= 1:
-            return True
-    return False
+    """Return True if primary model sees ANY person/object at all.
+
+    Intentionally broad: triggers secondary models whenever the primary
+    sees anything, so drowning classes that the primary misclassifies as
+    Level 0 still get a second opinion from the stronger secondary models.
+    Returns False only when the frame is completely empty (no detections).
+    """
+    return len(result.boxes) > 0
 
 
 def ensemble_predict(frame, conf, imgsz, iou, augment, device, half):
