@@ -47,8 +47,10 @@ uploads/*
 # Environment variables (sensitive credentials)
 .env
 
-# Model files (allow best.pt to be tracked)
+# Model files (allow trained best.pt files to be tracked)
 !best.pt
+!best_v2.pt
+!best_v3.pt
 yolo11n.pt
 *.pt
 *.weights
