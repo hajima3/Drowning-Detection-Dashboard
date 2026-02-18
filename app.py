@@ -28,6 +28,13 @@ JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "65"))                    # JPEG co
 DEFAULT_CONFIDENCE = float(os.getenv("DEFAULT_CONFIDENCE", "0.25"))
 LEVEL_2_DURATION_THRESHOLD = float(os.getenv("LEVEL_2_DURATION_THRESHOLD", "3.0"))
 
+# Optional strict-mode thresholds (per-level minimum confidence)
+# Example for very low false positives:
+#   LEVEL1_MIN_CONF=0.7
+#   LEVEL2_MIN_CONF=0.9
+LEVEL1_MIN_CONF = float(os.getenv("LEVEL1_MIN_CONF", "0.0"))
+LEVEL2_MIN_CONF = float(os.getenv("LEVEL2_MIN_CONF", "0.0"))
+
 # Performance / hardware overrides
 TARGET_FPS = float(os.getenv("TARGET_FPS", "30"))
 YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")  # auto | cpu | cuda:0 | 0
@@ -354,24 +361,52 @@ def generate_frames(source):
                 # Process based on highest alert level detected
                 if max_alert_level >= 1:  # Level 1 or Level 2
                     conf_percentage = round(max_conf * 100, 2)
-                    
-                    # Track duration for Level 2 behaviors
-                    if max_alert_level == 2:
+
+                    # Apply strict per-level confidence thresholds (optional)
+                    effective_level = max_alert_level
+                    if max_alert_level == 2 and LEVEL2_MIN_CONF > 0.0 and max_conf < LEVEL2_MIN_CONF:
+                        # Too low for Level 2; downgrade to Level 1 if it meets Level 1 min
+                        if LEVEL1_MIN_CONF > 0.0 and max_conf >= LEVEL1_MIN_CONF:
+                            effective_level = 1
+                        else:
+                            # Ignore this detection completely
+                            drowning_start_time = None
+                            continuous_drowning_frames = 0
+                            continue
+                    elif max_alert_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
+                        # Ignore weak Level 1 detections
+                        drowning_start_time = None
+                        continuous_drowning_frames = 0
+                        continue
+
+                    # Track duration for Level 2 behaviors (continuous drowning)
+                    if effective_level == 2:
                         if drowning_start_time is None:
                             drowning_start_time = current_time
                             continuous_drowning_frames = 1
                         else:
                             continuous_drowning_frames += 1
-                        
+
                         drowning_duration = current_time - drowning_start_time
                     else:
+                        # Any frame without Level 2 resets drowning timer
+                        drowning_start_time = None
+                        continuous_drowning_frames = 0
                         drowning_duration = 0
-                    
-                    # Set alert type and reason
-                    if max_alert_level == 2:
+
+                    # Set alert type and reason with duration-based Level 2 escalation
+                    if effective_level == 2 and drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
                         alert_level = 2
                         alert_type = 'Level 2 - Critical Drowning'
-                        reason = f'{detected_class_name} detected'
+                        reason = f'{detected_class_name} detected for {drowning_duration:.1f}s'
+                    elif effective_level == 2:
+                        # Treat short Level 2 detections as Level 1 warnings
+                        alert_level = 1
+                        alert_type = 'Level 1 - Possible Drowning'
+                        reason = (
+                            f'{detected_class_name} detected for {drowning_duration:.1f}s '
+                            f'(< {LEVEL_2_DURATION_THRESHOLD:.1f}s threshold)'
+                        )
                     else:
                         alert_level = 1
                         alert_type = 'Level 1 - Unsafe Movement'
