@@ -2,88 +2,26 @@
   "alert_levels": {
     "level_0": {
       "name": "Swimming",
-      "description": "Normal swimming — safe, no action needed",
-      "color": "#00ff88",
-      "classes": [
-        "Swimming",
-        "Level0_Safe",
-        "Back Float",
-        "Backstroke",
-        "Breaststroke",
-        "Butterfly",
-        "Dog Paddle",
-        "Entering Pool Behavior",
-        "Freestyle",
-        "Movements Allowed Outside Pool",
-        "Proper Swim Wear",
-        "Side Stroke",
-        "Treading Water",
-        "Underwater Swimming",
-        "Vertical Rest"
-      ]
+      "description": "Normal swimming - safe, no action needed",
+      "color": "#2196F3",
+      "classes": ["LVL 0"]
     },
     "level_1": {
       "name": "Risky",
-      "description": "Risky behavior — monitor and be ready to intervene",
+      "description": "Risky behavior - monitor and be ready to intervene",
       "color": "#ffa500",
-      "classes": [
-        "Risky",
-        "Level1_Unsafe",
-        "Erratic / Unstable Pool Movement",
-        "Improper Advanced / Coordinated Swimming",
-        "Improper Horizontal Stroke",
-        "Improper Movement",
-        "Improper Swim Wear",
-        "Improper Vertical Swimming",
-        "Unsafe Diving And Pool Entry"
-      ]
+      "classes": ["LVL 1"]
     },
     "level_2": {
       "name": "Drowning",
-      "description": "Drowning — immediate emergency response required",
-      "color": "#ff0000",
-      "classes": [
-        "Drowning",
-        "Level2_Critical",
-        "Descending Depth",
-        "Distress Signs",
-        "Erratic Splashing",
-        "Only Limbs Visible",
-        "Physical Collapse"
-      ]
+      "description": "Drowning - immediate emergency response required",
+      "color": "#8b0000",
+      "classes": ["LVL2"]
     }
   },
   "class_descriptions": {
-    "Swimming":                                   "Normal swimming — safe behavior",
-    "Risky":                                      "Risky behavior requiring monitoring",
-    "Drowning":                                   "Drowning — immediate emergency",
-    "Level0_Safe":                                "Safe swimming / permitted pool behavior",
-    "Level1_Unsafe":                              "Unsafe/improper swimming requiring monitoring",
-    "Level2_Critical":                            "Critical drowning emergency",
-    "Back Float":                                 "Floating on back",
-    "Backstroke":                                 "Backstroke swimming",
-    "Breaststroke":                               "Breaststroke swimming",
-    "Butterfly":                                  "Butterfly swimming",
-    "Dog Paddle":                                 "Dog paddle swimming",
-    "Entering Pool Behavior":                     "Entering the pool",
-    "Freestyle":                                  "Freestyle swimming",
-    "Movements Allowed Outside Pool":             "Permitted movement outside pool",
-    "Proper Swim Wear":                           "Proper swim attire",
-    "Side Stroke":                                "Side stroke swimming",
-    "Treading Water":                             "Treading water",
-    "Underwater Swimming":                        "Swimming underwater",
-    "Vertical Rest":                              "Vertical rest in water",
-    "Erratic / Unstable Pool Movement":           "Erratic or unstable movement in pool",
-    "Improper Advanced / Coordinated Swimming":   "Improper coordinated swimming technique",
-    "Improper Horizontal Stroke":                 "Improper horizontal stroke technique",
-    "Improper Movement":                          "Improper movement",
-    "Improper Swim Wear":                         "Improper swim attire",
-    "Improper Vertical Swimming":                 "Improper vertical swimming",
-    "Unsafe Diving And Pool Entry":               "Unsafe diving or pool entry",
-    "Descending Depth":                           "Descending in depth (sinking)",
-    "Distress Signs":                             "Visible distress signs",
-    "Erratic Splashing":                          "Erratic splashing indicating distress",
-    "Only Limbs Visible":                         "Only limbs visible above water",
-    "Physical Collapse":                          "Physical collapse"
+    "LVL 0": "Safe swimming (model output)",
+    "LVL 1": "Risky behavior (model output)",
+    "LVL2": "Drowning emergency (model output)"
   }
 }

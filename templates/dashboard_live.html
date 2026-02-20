@@ -229,7 +229,7 @@
         }
         .log-table td { padding: 12px 15px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
         .log-table tr:hover { background: rgba(255, 255, 255, 0.05); }
-        .log-row.level2-row { background: rgba(220, 53, 69, 0.15); border-left: 4px solid #ff6b6b; }
+        .log-row.level2-row { background: rgba(139, 0, 0, 0.15); border-left: 4px solid #8b0000; }
         .log-row.level1-row { background: rgba(255, 165, 0, 0.1); border-left: 4px solid #ffa500; }
         
         .log-badge {
@@ -239,7 +239,7 @@
             font-weight: bold;
             white-space: nowrap;
         }
-        .log-badge.level2 { background: #ff6b6b; color: white; }
+        .log-badge.level2 { background: #8b0000; color: white; }
         .log-badge.level1 { background: #ffa500; color: white; }
         
         .log-actions { display: flex; gap: 10px; }
@@ -273,6 +273,10 @@
         }
         .export-button { background: linear-gradient(135deg, #38ef7d 0%, #11998e 100%); padding: 10px 20px; width: auto; margin: 0; }
         .logs-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .log-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #667eea; }
+        .log-row.selected { background: rgba(102, 126, 234, 0.2) !important; outline: 1px solid rgba(102, 126, 234, 0.5); }
+        .delete-selected-btn { background: linear-gradient(135deg, #f5576c 0%, #f093fb 100%); padding: 10px 20px; width: auto; margin: 0; }
+        #selectAllHeader { width: 16px; height: 16px; cursor: pointer; accent-color: #667eea; }
         
         @media (max-width: 1200px) { .main-grid { grid-template-columns: 1fr; } }
     </style>
@@ -324,6 +328,12 @@
                         <input type="file" id="videoUpload" accept="video/*" onchange="uploadVideo(this)">
                         <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px; text-align: center;">Supports MP4, AVI, MOV</p>
                     </div>
+
+                    <div class="card" style="text-align: center;">
+                        <h3 class="card-title">📊 Live Stats</h3>
+                        <div style="font-size: 2em; font-weight: bold; color: #00ff88;" id="fpsDisplay">--</div>
+                        <div style="opacity: 0.7; font-size: 0.85em; margin-top: 4px;">Frames per Second</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -342,11 +352,6 @@
                         <div class="stat-text">🚨 Level 2 Emergencies</div>
                         <div style="font-size: 0.8em; opacity: 0.8; margin-top: 5px;">Drowning (75%+ confidence)</div>
                     </div>
-                    <div class="stat-card warning">
-                        <div class="stat-number" id="level1Count">0</div>
-                        <div class="stat-text">⚠️ Level 1 Warnings</div>
-                        <div style="font-size: 0.8em; opacity: 0.8; margin-top: 5px;">Unsafe Movement (50-75%)</div>
-                    </div>
                     <div class="stat-card">
                         <div class="stat-number" id="todayIncidentsCount">0</div>
                         <div class="stat-text">📅 Today's Incidents</div>
@@ -362,8 +367,8 @@
                 <div class="filter-section">
                     <button class="filter-button active-filter" onclick="filterLogs('all', event)">📊 All Alerts</button>
                     <button class="filter-button" onclick="filterLogs('level2', event)">🚨 Level 2 Only</button>
-                    <button class="filter-button" onclick="filterLogs('level1', event)">⚠️ Level 1 Only</button>
                     <button class="filter-button" onclick="filterLogs('today', event)">📅 Today</button>
+                    <button class="filter-button delete-selected-btn" onclick="deleteSelected()">☑️ Delete Selected</button>
                     <button class="filter-button danger" onclick="clearAllLogs()">🗑️ Clear All Logs</button>
                 </div>
 
@@ -371,6 +376,7 @@
                     <table class="log-table">
                         <thead>
                             <tr>
+                                <th><input type="checkbox" id="selectAllHeader" onchange="toggleSelectAll(this)" title="Select all"></th>
                                 <th>ID</th>
                                 <th>Timestamp</th>
                                 <th>Alert Level</th>
@@ -380,7 +386,7 @@
                             </tr>
                         </thead>
                         <tbody id="logsTableBody">
-                            <tr><td colspan="6" style="text-align: center; padding: 40px; opacity: 0.6;">No incidents logged yet.</td></tr>
+                            <tr><td colspan="7" style="text-align: center; padding: 40px; opacity: 0.6;">No incidents logged yet.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -489,7 +495,9 @@
             }
 
             if (filteredLogs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; opacity: 0.6;">No incidents match filter.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px; opacity: 0.6;">No incidents match filter.</td></tr>';
+                const hdr = document.getElementById('selectAllHeader');
+                if (hdr) hdr.checked = false;
             } else {
                 tbody.innerHTML = filteredLogs.map(log => {
                     const date = new Date(log.timestamp);
@@ -497,7 +505,8 @@
                     const isLevel2 = log.type.includes('Level 2');
                     const badgeClass = isLevel2 ? 'level2' : 'level1';
                     return `
-                        <tr class="${isLevel2 ? 'log-row level2-row' : 'log-row level1-row'}">
+                        <tr class="${isLevel2 ? 'log-row level2-row' : 'log-row level1-row'}" id="row-${log.id}">
+                            <td><input type="checkbox" class="log-checkbox" value="${log.id}" onchange="onRowCheckbox(this)"></td>
                             <td>#${log.id}</td>
                             <td>${formattedDate}</td>
                             <td><span class="log-badge ${badgeClass}">${log.type}</span></td>
@@ -520,12 +529,10 @@
 
         function updateLogStats() {
             const level2Count = incidentLogs.filter(log => log.type.includes('Level 2')).length;
-            const level1Count = incidentLogs.filter(log => log.type.includes('Level 1')).length;
             const today = new Date().toDateString();
             const todayCount = incidentLogs.filter(log => new Date(log.timestamp).toDateString() === today).length;
 
             document.getElementById('level2Count').textContent = level2Count;
-            document.getElementById('level1Count').textContent = level1Count;
             document.getElementById('todayIncidentsCount').textContent = todayCount;
             document.getElementById('totalLogsCount').textContent = incidentLogs.length;
         }
@@ -609,6 +616,43 @@
             updateLogsDisplay();
         }
 
+        function toggleSelectAll(checkbox) {
+            document.querySelectorAll('.log-checkbox').forEach(cb => {
+                cb.checked = checkbox.checked;
+                const row = cb.closest('tr');
+                if (row) row.classList.toggle('selected', checkbox.checked);
+            });
+        }
+
+        function onRowCheckbox(checkbox) {
+            const row = checkbox.closest('tr');
+            if (row) row.classList.toggle('selected', checkbox.checked);
+            // Sync Select-All header state
+            const all = document.querySelectorAll('.log-checkbox');
+            const checked = document.querySelectorAll('.log-checkbox:checked');
+            const hdr = document.getElementById('selectAllHeader');
+            if (hdr) {
+                hdr.checked = all.length > 0 && checked.length === all.length;
+                hdr.indeterminate = checked.length > 0 && checked.length < all.length;
+            }
+        }
+
+        function deleteSelected() {
+            const selected = [...document.querySelectorAll('.log-checkbox:checked')].map(cb => parseInt(cb.value));
+            if (selected.length === 0) {
+                showAlert('⚠️ No logs selected. Check the boxes next to the rows you want to delete.', 'warning');
+                return;
+            }
+            if (confirm(`⚠️ Delete ${selected.length} selected log(s)? This cannot be undone.`)) {
+                incidentLogs = incidentLogs.filter(log => !selected.includes(log.id));
+                localStorage.setItem('drowningLogs', JSON.stringify(incidentLogs));
+                const hdr = document.getElementById('selectAllHeader');
+                if (hdr) { hdr.checked = false; hdr.indeterminate = false; }
+                updateLogsDisplay();
+                showAlert(`🗑️ Deleted ${selected.length} log(s)`, 'success');
+            }
+        }
+
         // Detection functions
         function showAlert(message, type = 'success') {
             const alertBox = document.getElementById('alertBox');
@@ -666,34 +710,45 @@
         }
 
         async function uploadVideo(input) {
-            if (input.files && input.files[0]) {
-                const file = input.files[0];
-                const formData = new FormData();
-                formData.append('video', file);
-                showAlert('⏳ Uploading...', 'warning');
-                try {
-                    const response = await fetch('/upload_video', { method: 'POST', body: formData });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        // Force reload video feed with cache bust
-                        const timestamp = new Date().getTime();
-                        document.getElementById('videoContainer').innerHTML = `<img id="videoFeed" src="/video_feed?t=${timestamp}">`;
-                        document.getElementById('statusIndicator').className = 'status-indicator active';
-                        showAlert('✅ Video uploaded!', 'success');
-                        
-                        // Stop any playing alert audio when switching source
-                        stopAlertSounds();
-                        
-                        // Start automatic detection polling
-                        startDetectionPolling();
-                        
-                        // Reset the file input so the same file can be uploaded again
-                        input.value = '';
-                    }
-                } catch (error) {
-                    showAlert('❌ Error: ' + error.message, 'error');
-                }
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+
+            // Client-side 500 MB guard
+            if (file.size > 500 * 1024 * 1024) {
+                showAlert('❌ File too large (max 500 MB)', 'error');
+                input.value = '';
+                return;
             }
+
+            // Stop current stream before uploading
+            stopDetectionPolling();
+            stopAlertSounds();
+            try { await fetch('/stop_detection', { method: 'POST' }); } catch (_) {}
+
+            const formData = new FormData();
+            formData.append('video', file);
+            showAlert(`⏳ Uploading "${file.name}" (${(file.size/1024/1024).toFixed(1)} MB)…`, 'warning');
+
+            try {
+                const response = await fetch('/upload_video', { method: 'POST', body: formData });
+                let data;
+                try { data = await response.json(); }
+                catch (_) { data = { status: 'error', message: `Server error ${response.status}` }; }
+
+                if (data.status === 'success') {
+                    const timestamp = new Date().getTime();
+                    document.getElementById('videoContainer').innerHTML =
+                        `<img id="videoFeed" src="/video_feed?t=${timestamp}" style="width:100%;border-radius:10px;">`;
+                    document.getElementById('statusIndicator').className = 'status-indicator active';
+                    showAlert(`✅ Playing: ${data.filename || file.name}`, 'success');
+                    startDetectionPolling();
+                } else {
+                    showAlert('❌ Upload failed: ' + (data.message || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                showAlert('❌ Network error: ' + error.message, 'error');
+            }
+            input.value = '';
         }
 
         async function updateConfidence(value) {
@@ -709,46 +764,67 @@
 
         // Automatic detection polling and logging
         let detectionPollingInterval = null;
-        let level1Audio = null;
-        let level2Audio = null;
+        let level2Audio = null;  // Level 2 alarm MP3 (loaded on demand)
         
-        // Initialize alert sounds
-        function initAlertSounds() {
-            if (!level1Audio) {
-                level1Audio = new Audio('/static/audio/level1.mp3');
-                level1Audio.volume = 0.7; // 70% volume for Level 1
-            }
-            if (!level2Audio) {
-                level2Audio = new Audio('/static/audio/level2.mp3');
-                level2Audio.volume = 1.0; // Full volume for Level 2 emergency
+        // ---- Audio engine ----
+        // Level 1 (Risky): short beep generated via Web Audio API — no file needed
+        // Level 2 (Drowning, >=3s): plays level2.mp3 alarm file
+        let _audioCtx = null;
+        function _getAudioCtx() {
+            if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            return _audioCtx;
+        }
+
+        function playBeep() {
+            // Short 880 Hz beep, 200 ms — Level 1 authority alert
+            try {
+                const ctx = _getAudioCtx();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, ctx.currentTime);
+                gain.gain.setValueAtTime(0.6, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 0.2);
+            } catch (e) {
+                console.log('Beep failed:', e);
             }
         }
-        
-        function playAlertSound(level) {
+
+        function initAlertSounds() {
+            if (!level2Audio) {
+                level2Audio = new Audio('/static/audio/level2.mp3');
+                level2Audio.volume = 1.0;
+            }
+        }
+
+        // Play sound based on the `audio` field returned from the backend:
+        //   'beep'  → Level 1 short tone (no SMS, authority alert only)
+        //   'alarm' → Level 2 full siren (SMS + alarm, >=3s drowning confirmed)
+        //   'none'  → silence
+        function playAlertSound(audioCue) {
             try {
-                initAlertSounds();
-                
-                if (level === 2 && level2Audio) {
-                    // Play Level 2 emergency sound
-                    level2Audio.currentTime = 0; // Reset to start
-                    level2Audio.play().catch(err => console.log('Level 2 audio play failed:', err));
-                } else if (level === 1 && level1Audio) {
-                    // Play Level 1 warning sound
-                    level1Audio.currentTime = 0; // Reset to start
-                    level1Audio.play().catch(err => console.log('Level 1 audio play failed:', err));
+                if (audioCue === 'beep') {
+                    playBeep();
+                } else if (audioCue === 'alarm') {
+                    initAlertSounds();
+                    if (level2Audio) {
+                        level2Audio.currentTime = 0;
+                        level2Audio.play().catch(err => console.log('Alarm audio failed:', err));
+                    }
                 }
+                // 'none' or unknown → do nothing
             } catch (error) {
                 console.log('Alert sound error:', error);
             }
         }
-        
+
         // Stop any currently playing alert sounds
         function stopAlertSounds() {
             try {
-                if (level1Audio) {
-                    level1Audio.pause();
-                    level1Audio.currentTime = 0;
-                }
                 if (level2Audio) {
                     level2Audio.pause();
                     level2Audio.currentTime = 0;
@@ -760,27 +836,33 @@
         
         async function checkForDetections() {
             try {
-                const response = await fetch('/get_detections');
-                const data = await response.json();
-                
-                console.log('Detection check:', data); // Debug logging
-                
+                const [detRes, statsRes] = await Promise.all([
+                    fetch('/get_detections'),
+                    fetch('/get_stats')
+                ]);
+                const data = await detRes.json();
+                const stats = await statsRes.json();
+
+                // Update FPS display
+                const fpsEl = document.getElementById('fpsDisplay');
+                if (fpsEl) fpsEl.textContent = stats.active ? stats.fps + ' FPS' : '--';
+
                 if (data.status === 'success' && data.detections && data.detections.length > 0) {
-                    console.log('Found detections:', data.detections.length); // Debug
-                    
                     data.detections.forEach(detection => {
-                        console.log('Processing detection:', detection); // Debug
-                        
-                        // Automatically log detection
-                        addLog(detection.type, detection.confidence);
-                        
-                        // Determine alert type and response based on level
-                        const isLevel2 = detection.level === 2;
-                        
-                        // Play alert sound based on level (Level 1 or Level 2)
-                        if (detection.level === 1 || detection.level === 2) {
-                            playAlertSound(detection.level);
+                        // Only log Level 2 (Drowning) emergencies — Level 1 is audio-only
+                        if (detection.level === 2) {
+                            addLog(detection.type, detection.confidence);
                         }
+
+                        // Play sound based on audio cue field from backend:
+                        //   'beep'  = Level 1 authority alert (beep only)
+                        //   'alarm' = Level 2 full emergency (>=3s confirmed)
+                        //   'none'  = silence
+                        if (detection.audio && detection.audio !== 'none') {
+                            playAlertSound(detection.audio);
+                        }
+
+                        const isLevel2 = detection.level === 2;
 
                         // For Level 2, also show prominent on-screen alert and browser notification
                         if (isLevel2) {
@@ -817,17 +899,15 @@
         // Start polling when webcam/video starts
         function startDetectionPolling() {
             if (!detectionPollingInterval) {
-                detectionPollingInterval = setInterval(checkForDetections, 1000); // Check every second
-                console.log('✅ Automatic detection logging started');
+                detectionPollingInterval = setInterval(checkForDetections, 1000);
             }
         }
-        
+
         // Stop polling when detection stops
         function stopDetectionPolling() {
             if (detectionPollingInterval) {
                 clearInterval(detectionPollingInterval);
                 detectionPollingInterval = null;
-                console.log('⏹️ Automatic detection logging stopped');
             }
         }
         

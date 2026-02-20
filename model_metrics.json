@@ -1,18 +1,6 @@
 {
   "current_model": "best.pt",
-  "target_f1": 95.0,
-  "iterations": [
-    {
-      "iteration": 1,
-      "model_name": "best_v1.pt",
-      "date": "2026-02-02",
-      "dataset_size": 500,
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1_score": 0.0,
-      "map50": 0.0,
-      "status": "pending",
-      "notes": "Initial baseline model - awaiting training"
-    }
-  ]
+  "classes": ["LVL 0", "LVL 1", "LVL2"],
+  "deployed_date": "2026-02-21",
+  "notes": "3-class model: LVL 0 (Safe), LVL 1 (Risky), LVL2 (Drowning)"
 }

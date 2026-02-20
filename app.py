@@ -5,6 +5,7 @@ Real-time pool safety monitoring with 2-level alert system
 
 from flask import Flask, render_template, Response, request, jsonify
 from ultralytics import YOLO
+from werkzeug.utils import secure_filename
 import cv2
 import time
 import os
@@ -66,7 +67,7 @@ YOLO_HALF = os.getenv("YOLO_HALF", "auto")  # auto | true | false
 
 # ======================== FLASK APP ========================
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['UPLOAD_FOLDER'] = str(Path(__file__).parent / 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
 
 # Create required folders
@@ -78,12 +79,12 @@ METRICS_FILE = Path(__file__).parent / "model_metrics.json"
 CLASS_MAPPING_FILE = Path(__file__).parent / "class_mapping.json"
 
 def load_model_metrics():
-    """Load model iteration metrics"""
+    """Load deployed model info"""
     try:
         with open(METRICS_FILE, 'r') as f:
             return json.load(f)
     except:
-        return {"current_model": "best.pt", "target_f1": 95.0, "iterations": []}
+        return {"current_model": "best.pt", "classes": ["LVL 0", "LVL 1", "LVL2"]}
 
 def load_class_mapping():
     """Load class to alert level mapping"""
@@ -96,10 +97,12 @@ def load_class_mapping():
 # Load class mapping
 class_mapping = load_class_mapping()
 if class_mapping:
-    print("✅ Class mapping loaded successfully!")
-    print(f"   Level 0: {len(class_mapping['alert_levels']['level_0']['classes'])} classes")
-    print(f"   Level 1: {len(class_mapping['alert_levels']['level_1']['classes'])} classes")
-    print(f"   Level 2: {len(class_mapping['alert_levels']['level_2']['classes'])} classes")
+    model_classes = [
+        c
+        for level in class_mapping['alert_levels'].values()
+        for c in level['classes']
+    ]
+    print(f"✅ Class mapping loaded: {', '.join(model_classes)}")
 
 
 def send_telegram_alert(detection_event):
@@ -176,7 +179,8 @@ def     get_alert_level_for_class(class_name):
     if name_key in {
         "drowning", "drown", "drowning_person", "level2_critical",
         "descending_depth", "distress_signs", "erratic_splashing",
-        "only_limbs_visible", "physical_collapse"
+        "only_limbs_visible", "physical_collapse",
+        "lvl2"  # model output: LVL2
     }:
         return 2, "Drowning"
 
@@ -187,7 +191,8 @@ def     get_alert_level_for_class(class_name):
         "improper_advanced_coordinated_swimming",
         "improper_horizontal_stroke", "improper_movement",
         "improper_swim_wear", "improper_vertical_swimming",
-        "unsafe_diving_and_pool_entry"
+        "unsafe_diving_and_pool_entry",
+        "lvl_1"  # model output: LVL 1
     }:
         return 1, "Risky"
 
@@ -197,7 +202,8 @@ def     get_alert_level_for_class(class_name):
         "back_float", "backstroke", "breaststroke", "butterfly", "dog_paddle",
         "freestyle", "side_stroke", "treading_water", "underwater_swimming",
         "vertical_rest", "entering_pool_behavior",
-        "movements_allowed_outside_pool", "proper_swim_wear"
+        "movements_allowed_outside_pool", "proper_swim_wear",
+        "lvl_0"  # model output: LVL 0
     }:
         return 0, "Swimming"
 
@@ -229,15 +235,12 @@ elif str(YOLO_HALF).lower() == "auto":
     use_half = bool(torch.cuda.is_available())
 
 # ======================== MODEL LOADING ========================
-print("🔄 Loading YOLOv11 model...")
-
 def _load_model():
     root = Path(__file__).parent
     env_path = os.getenv("MODEL_PATH")
     if env_path:
         model_path = str(Path(env_path))
     else:
-        # Use first existing file from model_files list, fall back to best.pt
         configured = _det_cfg.get("model_files", ["best.pt"])
         names = configured if isinstance(configured, list) else [configured]
         model_path = str(root / "best.pt")
@@ -246,27 +249,22 @@ def _load_model():
             if candidate.exists():
                 model_path = str(candidate)
                 break
-    print(f"   Model: {model_path}")
     m = YOLO(model_path)
     try:
         m.fuse()
     except Exception:
         pass
-    print("✅ Model loaded!")
+    classes = list(m.names.values())
+    print(f"✅ Model ready: {Path(model_path).name} | Classes: {', '.join(classes)}")
     return m
 
 model = _load_model()
-
-# Display best iteration from training metrics
-_metrics = load_model_metrics()
-if _metrics.get("iterations"):
-    _best_m = max(_metrics["iterations"], key=lambda x: x.get("f1_score", 0))
-    print(f"📊 Best Iteration: {_best_m['iteration']} | F1: {_best_m['f1_score']}%")
 
 
 current_source = None
 detection_active = False
 confidence_threshold = DEFAULT_CONFIDENCE
+current_fps = 0.0  # Updated by generate_frames, read by /get_stats
 
 # Detection tracking
 latest_detections = []
@@ -279,7 +277,7 @@ continuous_drowning_frames = 0
 # ======================== VIDEO PROCESSING ========================
 def generate_frames(source):
     """Generate frames with YOLOv11 detection"""
-    global detection_active, drowning_start_time, continuous_drowning_frames
+    global detection_active, drowning_start_time, continuous_drowning_frames, current_fps
     
     # Initialize video capture
     if source == 0:
@@ -310,9 +308,7 @@ def generate_frames(source):
         display_width = original_width
         display_height = original_height
     
-    print(f"📹 Original: {original_width}x{original_height}")
-    print(f"🔄 Processing: {process_width}x{process_height}")
-    print(f"📺 Display: {display_width}x{display_height}")
+    print(f"📹 Stream started ({display_width}x{display_height})")
     
     frame_count = 0
     fps_time = time.time()
@@ -376,17 +372,6 @@ def generate_frames(source):
             # Process detections
             detections = results.boxes
             if len(detections) > 0:
-                # Debug log once per 30 frames
-                if frame_count % 30 == 0:
-                    seen = []
-                    for _b in detections:
-                        _cid = int(_b.cls[0])
-                        _cn = model.names.get(_cid, f"class_{_cid}")
-                        _lv, _ = get_alert_level_for_class(_cn)
-                        seen.append(f"{_cn}({float(_b.conf[0]):.2f}→L{_lv})")
-                    print(f"[DETECT frame={frame_count}] {', '.join(seen)}")
-
-                # Find highest alert level across all boxes
                 max_alert_level = 0
                 max_conf = 0
                 detected_class_name = "Unknown"
@@ -442,57 +427,66 @@ def generate_frames(source):
 
                     # Set alert type and reason with duration-based Level 2 escalation
                     if effective_level == 2 and drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
+                        # Full Level 2 emergency — 3+ continuous seconds of drowning
                         alert_level = 2
                         alert_type = 'Level 2 - Drowning'
+                        audio_cue = 'alarm'
                         reason = f'{detected_class_name} detected for {drowning_duration:.1f}s'
+                        should_fire = True
                     elif effective_level == 2:
-                        # Treat short Level 2 detections as Level 1 Risky warnings
-                        alert_level = 1
-                        alert_type = 'Level 1 - Risky'
-                        reason = (
-                            f'{detected_class_name} detected for {drowning_duration:.1f}s '
-                            f'(< {LEVEL_2_DURATION_THRESHOLD:.1f}s threshold)'
-                        )
+                        # Level 2 building up — silent, waiting for 3s threshold
+                        # No alert, no beep, no log — just keep the timer running
+                        should_fire = False
+                        audio_cue = 'none'
+                        alert_level = 2
+                        alert_type = 'Level 2 - Drowning'
+                        reason = ''
                     else:
+                        # Genuine Level 1 — beep only, no SMS
                         alert_level = 1
                         alert_type = 'Level 1 - Risky'
+                        audio_cue = 'beep'
                         reason = f'{detected_class_name} detected'
+                        should_fire = True
                     
-                    # Log detection (avoid duplicates within 2 seconds)
-                    should_log = True
-                    if detection_history:
-                        last_detection = detection_history[-1]
-                        time_diff = current_time - last_detection['timestamp']
-                        if time_diff < 2.0 and last_detection['level'] == alert_level:
-                            should_log = False
-                    
-                    if should_log:
-                        detection_event = {
-                            'type': alert_type,
-                            'level': alert_level,
-                            'confidence': conf_percentage,
-                            'timestamp': current_time,
-                            'class': detected_class_name,
-                            'count': len(detections),
-                            'duration': round(drowning_duration, 1) if drowning_duration > 0 else 0,
-                            'reason': reason
-                        }
-                        detection_history.append(detection_event)
-                        latest_detections.append(detection_event)
-                        
-                        # Keep only last 50 detections
-                        if len(detection_history) > 50:
-                            detection_history.pop(0)
+                    # Only log and alert if this event should fire
+                    if should_fire:
+                        # Avoid duplicate events within 2 seconds of same level
+                        should_log = True
+                        if detection_history:
+                            last_detection = detection_history[-1]
+                            time_diff = current_time - last_detection['timestamp']
+                            if time_diff < 2.0 and last_detection['level'] == alert_level:
+                                should_log = False
 
-                        # For Level 2 alerts, trigger Telegram notification (if configured)
-                        if alert_level == 2:
-                            send_telegram_alert(detection_event)
+                        if should_log:
+                            detection_event = {
+                                'type': alert_type,
+                                'level': alert_level,
+                                'audio': audio_cue,        # 'alarm' | 'beep' | 'none'
+                                'confidence': conf_percentage,
+                                'timestamp': current_time,
+                                'class': detected_class_name,
+                                'count': len(detections),
+                                'duration': round(drowning_duration, 1) if drowning_duration > 0 else 0,
+                                'reason': reason
+                            }
+                            detection_history.append(detection_event)
+                            latest_detections.append(detection_event)
+
+                            # Keep only last 50 detections
+                            if len(detection_history) > 50:
+                                detection_history.pop(0)
+
+                            # Level 2 >= 3s only: trigger Telegram / SMS alert
+                            if alert_level == 2:
+                                send_telegram_alert(detection_event)
                     
                     # Display alert
                     text_scale = display_width / original_width
                     
                     if alert_level == 2:
-                        color = (0, 0, 255)  # Red
+                        color = (0, 0, 139)  # Maroon
                         label = f'DROWNING EMERGENCY: {detected_class_name}'
                         if drowning_duration > 0:
                             label += f' | {drowning_duration:.1f}s'
@@ -515,16 +509,16 @@ def generate_frames(source):
                 drowning_start_time = None
                 continuous_drowning_frames = 0
             
-            # FPS counter
+            # FPS counter — recalculate every 30 frames, draw every frame
             if frame_count % 30 == 0:
                 fps_current_time = time.time()
-                fps = 30 / (fps_current_time - fps_time)
+                current_fps = 30 / max(fps_current_time - fps_time, 0.001)
                 fps_time = fps_current_time
-                
-                fps_x = display_width - int(160 * (display_width / original_width))
-                cv2.rectangle(annotated_frame, (fps_x, 5), (display_width-5, 45), (50, 50, 50), -1)
-                cv2.putText(annotated_frame, f'FPS: {fps:.1f}', (fps_x+10, 35),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            fps_x = display_width - int(160 * (display_width / original_width))
+            cv2.rectangle(annotated_frame, (fps_x, 5), (display_width - 5, 45), (40, 40, 40), -1)
+            cv2.putText(annotated_frame, f'FPS: {current_fps:.1f}', (fps_x + 10, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             last_annotated_frame = annotated_frame
         
@@ -587,27 +581,42 @@ def stop_detection():
 def upload_video():
     """Upload and process video"""
     global current_source, detection_active, drowning_start_time, continuous_drowning_frames
-    
+
+    # Stop any active stream before switching source
+    detection_active = False
+    current_source = None
+
     if 'video' not in request.files:
-        return jsonify({"status": "error", "message": "No video file"}), 400
-    
+        return jsonify({"status": "error", "message": "No video file provided"}), 400
+
     file = request.files['video']
-    if file.filename == '':
+    if not file or file.filename == '':
         return jsonify({"status": "error", "message": "No file selected"}), 400
-    
+
     try:
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        filename = secure_filename(file.filename)
+        if not filename:
+            # Fallback name in case secure_filename strips everything
+            filename = f"upload_{int(time.time())}.mp4"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        
+
+        if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+            return jsonify({"status": "error", "message": "File saved but appears empty"}), 500
+
         drowning_start_time = None
         continuous_drowning_frames = 0
-        
         current_source = filepath
         detection_active = True
-        
-        return jsonify({"status": "success", "message": f"Video uploaded: {file.filename}"})
+
+        return jsonify({"status": "success", "message": f"Video uploaded: {filename}", "filename": filename})
     except Exception as e:
         return jsonify({"status": "error", "message": f"Upload failed: {str(e)}"}), 500
+
+
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    return jsonify({"status": "error", "message": "File too large (max 500 MB)"}), 413
 
 @app.route('/set_confidence', methods=['POST'])
 def set_confidence():
@@ -624,6 +633,7 @@ def get_stats():
     return jsonify({
         "active": detection_active,
         "confidence": confidence_threshold * 100,
+        "fps": round(current_fps, 1),
         "source": "Webcam" if current_source == 0 else ("Video" if current_source else "None")
     })
 
@@ -663,4 +673,4 @@ if __name__ == '__main__':
     print("🌐 Open: http://localhost:5000")
     print("✅ Ready!\n")
     
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
