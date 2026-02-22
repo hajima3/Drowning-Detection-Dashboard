@@ -12,6 +12,7 @@ import os
 import json
 import re
 from pathlib import Path
+from collections import deque
 import requests
 from dotenv import load_dotenv
 import torch
@@ -84,7 +85,7 @@ def load_model_metrics():
         with open(METRICS_FILE, 'r') as f:
             return json.load(f)
     except:
-        return {"current_model": "best.pt", "classes": ["LVL 0", "LVL 1", "LVL2"]}
+        return {"current_model": "best.pt", "classes": ["Level 0", "Level 1", "Level 2"]}
 
 def load_class_mapping():
     """Load class to alert level mapping"""
@@ -96,13 +97,6 @@ def load_class_mapping():
 
 # Load class mapping
 class_mapping = load_class_mapping()
-if class_mapping:
-    model_classes = [
-        c
-        for level in class_mapping['alert_levels'].values()
-        for c in level['classes']
-    ]
-    print(f"✅ Class mapping loaded: {', '.join(model_classes)}")
 
 
 def send_telegram_alert(detection_event):
@@ -126,21 +120,21 @@ def send_telegram_alert(detection_event):
     detected_class = detection_event.get("class", "Unknown")
     duration = detection_event.get("duration", 0)
 
-    lines = [
-        "🚨 *POOL ALERT: LEVEL 2 DROWNING EMERGENCY*",
-        f"*Confidence:* {confidence}%",
-        f"*Behavior:* {detected_class}",
-    ]
-    if duration:
-        lines.append(f"*Duration:* {duration}s")
+    import datetime
+    time_str = datetime.datetime.now().strftime("%H:%M:%S")
 
-    text = "\n".join(lines)
+    text = (
+        "EMERGENCY ALERT\n"
+        "Drowning incident detected at Silliman University Pool.\n"
+        "Immediate ambulance dispatch required.\n"
+        f"Time: {time_str}\n"
+        "Location: https://maps.app.goo.gl/1aHKjNd1N1tLyuPM6"
+    )
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
     }
 
     try:
@@ -180,7 +174,9 @@ def     get_alert_level_for_class(class_name):
         "drowning", "drown", "drowning_person", "level2_critical",
         "descending_depth", "distress_signs", "erratic_splashing",
         "only_limbs_visible", "physical_collapse",
-        "lvl2"  # model output: LVL2
+        "dorwning",   # old model: misspelled
+        "lvl2",       # old model: LVL2
+        "level_2",    # new model: Level 2
     }:
         return 2, "Drowning"
 
@@ -192,7 +188,8 @@ def     get_alert_level_for_class(class_name):
         "improper_horizontal_stroke", "improper_movement",
         "improper_swim_wear", "improper_vertical_swimming",
         "unsafe_diving_and_pool_entry",
-        "lvl_1"  # model output: LVL 1
+        "lvl_1",      # old model: LVL 1
+        "level_1",    # new model: Level 1
     }:
         return 1, "Risky"
 
@@ -203,7 +200,8 @@ def     get_alert_level_for_class(class_name):
         "freestyle", "side_stroke", "treading_water", "underwater_swimming",
         "vertical_rest", "entering_pool_behavior",
         "movements_allowed_outside_pool", "proper_swim_wear",
-        "lvl_0"  # model output: LVL 0
+        "lvl_0",      # old model: LVL 0
+        "level_0",    # new model: Level 0
     }:
         return 0, "Swimming"
 
@@ -218,6 +216,81 @@ def     get_alert_level_for_class(class_name):
 
     # Unknown class — default to Swimming (Level 0)
     return 0, "Swimming"
+
+
+def _iou(a, b):
+    """Compute IoU between two boxes [x1,y1,x2,y2] (display coords)."""
+    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def cross_class_nms(raw_boxes, iou_threshold=0.45):
+    """
+    Filter overlapping boxes across different classes.
+    Keeps the box with the highest alert_level; ties broken by confidence.
+    raw_boxes: list of dicts with keys x1,y1,x2,y2,conf,alert_level,class_name
+    """
+    # Sort: highest alert level first, then highest conf
+    sorted_boxes = sorted(raw_boxes, key=lambda d: (d['alert_level'], d['conf']), reverse=True)
+    kept = []
+    for candidate in sorted_boxes:
+        box_c = (candidate['x1'], candidate['y1'], candidate['x2'], candidate['y2'])
+        suppressed = False
+        for accepted in kept:
+            box_a = (accepted['x1'], accepted['y1'], accepted['x2'], accepted['y2'])
+            if _iou(box_c, box_a) >= iou_threshold:
+                suppressed = True
+                break
+        if not suppressed:
+            kept.append(candidate)
+    return kept
+
+
+def _smoothed_alert_level(level_window, conf_window):
+    """
+    Confidence-weighted vote across the last N frames.
+
+    Asymmetric thresholds (safety-first):
+      Level 2 fires if it holds >= 25% of weighted votes  (~4 / 15 frames)
+      Level 1 fires if it holds >= 35% of weighted votes  (~5 / 15 frames)
+      Otherwise Level 0.
+
+    This means:
+      - A single noisy frame cannot flip the state
+      - Drowning is still caught quickly (4 frames ≈ 0.13 s at 30 fps)
+      - False Level 1 chatter is filtered out unless sustained
+    """
+    if not level_window:
+        return 0
+
+    level_weights = {0: 0.0, 1: 0.0, 2: 0.0}
+    total_weight = 0.0
+    for level, conf in zip(level_window, conf_window):
+        # Floor weight at 0.10 so zero-conf (no-detection) frames still count
+        w = max(float(conf), 0.10)
+        level_weights[level] = level_weights.get(level, 0.0) + w
+        total_weight += w
+
+    if total_weight == 0:
+        return 0
+
+    l2_frac = level_weights.get(2, 0.0) / total_weight
+    l1_frac = level_weights.get(1, 0.0) / total_weight
+
+    # Level 2 needs 35% weighted votes  (~5-6 / 15 frames)
+    # Level 1 needs 70% weighted votes  (~10-11 / 15 frames) — very hard to reach by noise
+    if l2_frac >= 0.35:
+        return 2
+    if l1_frac >= 0.70:
+        return 1
+    return 0
 
 # ======================== DEVICE SETUP ========================
 if YOLO_DEVICE.lower() == "auto":
@@ -255,7 +328,7 @@ def _load_model():
     except Exception:
         pass
     classes = list(m.names.values())
-    print(f"✅ Model ready: {Path(model_path).name} | Classes: {', '.join(classes)}")
+    print(f"🌊  Drowning Detection  |  {Path(model_path).name}  |  {' / '.join(classes)}")
     return m
 
 model = _load_model()
@@ -273,11 +346,12 @@ detection_history = []
 # Drowning duration tracking
 drowning_start_time = None
 continuous_drowning_frames = 0
+drowning_miss_frames = 0   # grace-period counter for timer hysteresis
 
 # ======================== VIDEO PROCESSING ========================
 def generate_frames(source):
     """Generate frames with YOLOv11 detection"""
-    global detection_active, drowning_start_time, continuous_drowning_frames, current_fps
+    global detection_active, drowning_start_time, continuous_drowning_frames, drowning_miss_frames, current_fps
     
     # Initialize video capture
     if source == 0:
@@ -316,6 +390,12 @@ def generate_frames(source):
     last_frame_time = time.time()
     target_fps = TARGET_FPS
     infer_imgsz = YOLO_IMGSZ
+
+    # Temporal smoothing — rolling window of the last 15 processed frames
+    SMOOTH_WINDOW = 15
+    level_vote_window = deque(maxlen=SMOOTH_WINDOW)  # alert level per frame
+    conf_vote_window  = deque(maxlen=SMOOTH_WINDOW)  # max confidence per frame
+    drowning_miss_frames = 0  # reset per stream session
     
     while detection_active:
         success, frame = cap.read()
@@ -363,19 +443,26 @@ def generate_frames(source):
                 half=use_half,
                 verbose=False,
             )[0]
-            annotated_frame = results.plot()
 
-            # Resize to display size
-            if SCALE_FACTOR != 1.0 or display_width != original_width:
-                annotated_frame = cv2.resize(annotated_frame, (display_width, display_height))
+            # Build base display frame (clean, no YOLO default colors)
+            if display_width != original_width or display_height != original_height:
+                annotated_frame = cv2.resize(frame, (display_width, display_height))
+            else:
+                annotated_frame = frame.copy()
+
+            # Scale factors: inference coords → display coords
+            scale_x = display_width / process_width
+            scale_y = display_height / process_height
 
             # Process detections
             detections = results.boxes
-            if len(detections) > 0:
+            if detections is not None and len(detections) > 0:
                 max_alert_level = 0
                 max_conf = 0
                 detected_class_name = "Unknown"
 
+                # --- Step 1: Collect all raw boxes ---
+                raw_boxes = []
                 for box in detections:
                     class_id = int(box.cls[0])
                     conf = float(box.conf[0])
@@ -384,19 +471,63 @@ def generate_frames(source):
                     except Exception:
                         class_name = f"class_{class_id}"
                     alert_level, _ = get_alert_level_for_class(class_name)
+
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    raw_boxes.append({
+                        'x1': int(x1 * scale_x), 'y1': int(y1 * scale_y),
+                        'x2': int(x2 * scale_x), 'y2': int(y2 * scale_y),
+                        'conf': conf, 'alert_level': alert_level, 'class_name': class_name
+                    })
+
+                # --- Step 2: Cross-class NMS (remove duplicate boxes for same region) ---
+                filtered_boxes = cross_class_nms(raw_boxes, iou_threshold=0.45)
+
+                # --- Step 3: Draw surviving boxes and track highest alert level ---
+                for det in filtered_boxes:
+                    x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
+                    conf = det['conf']
+                    alert_level = det['alert_level']
+                    class_name = det['class_name']
+
+                    # Color per alert level (BGR)
+                    if alert_level == 2:
+                        box_color = (0, 0, 180)      # Dark Red
+                    elif alert_level == 1:
+                        box_color = (0, 140, 255)    # Orange
+                    else:
+                        box_color = (220, 180, 0)    # Blue
+
+                    # Draw bounding box
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
+
+                    # Draw label background + text
+                    label = f'{class_name} {conf:.2f}'
+                    (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                    cv2.rectangle(annotated_frame, (x1, y1 - th - bl - 8), (x1 + tw + 6, y1), box_color, -1)
+                    cv2.putText(annotated_frame, label, (x1 + 3, y1 - bl - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                    # Track highest alert level
                     if alert_level > max_alert_level or (alert_level == max_alert_level and conf > max_conf):
                         max_alert_level = alert_level
                         max_conf = conf
                         detected_class_name = class_name
-                
-                # Process based on highest alert level detected
-                if max_alert_level >= 1:  # Level 1 or Level 2
+
+                # --- Step 4: Push this frame's result to the smoothing window ---
+                level_vote_window.append(max_alert_level)
+                conf_vote_window.append(max_conf)
+
+                # Derive consensus alert level across recent frames
+                smoothed_level = _smoothed_alert_level(level_vote_window, conf_vote_window)
+
+                # Process based on smoothed (consensus) alert level
+                if smoothed_level >= 1:  # Level 1 or Level 2
                     conf_percentage = round(max_conf * 100, 2)
 
-                    # Apply strict per-level confidence thresholds (optional)
-                    effective_level = max_alert_level
-                    if max_alert_level == 2 and LEVEL2_MIN_CONF > 0.0 and max_conf < LEVEL2_MIN_CONF:
-                        # Too low for Level 2; downgrade to Level 1 if it meets Level 1 min
+                    # Apply per-level confidence floor (uses raw frame conf as gate)
+                    effective_level = smoothed_level
+                    if smoothed_level == 2 and LEVEL2_MIN_CONF > 0.0 and max_conf < LEVEL2_MIN_CONF:
+                        # Raw conf too low for Level 2; downgrade if Level 1 conf met
                         if LEVEL1_MIN_CONF > 0.0 and max_conf >= LEVEL1_MIN_CONF:
                             effective_level = 1
                         else:
@@ -404,7 +535,7 @@ def generate_frames(source):
                             drowning_start_time = None
                             continuous_drowning_frames = 0
                             continue
-                    elif max_alert_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
+                    elif smoothed_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
                         # Ignore weak Level 1 detections
                         drowning_start_time = None
                         continuous_drowning_frames = 0
@@ -412,6 +543,7 @@ def generate_frames(source):
 
                     # Track duration for Level 2 behaviors (continuous drowning)
                     if effective_level == 2:
+                        drowning_miss_frames = 0  # clear grace counter
                         if drowning_start_time is None:
                             drowning_start_time = current_time
                             continuous_drowning_frames = 1
@@ -420,10 +552,14 @@ def generate_frames(source):
 
                         drowning_duration = current_time - drowning_start_time
                     else:
-                        # Any frame without Level 2 resets drowning timer
-                        drowning_start_time = None
-                        continuous_drowning_frames = 0
-                        drowning_duration = 0
+                        # Hysteresis: allow up to 20 non-Level-2 frames (~0.67s)
+                        # before resetting the drowning countdown.
+                        drowning_miss_frames += 1
+                        if drowning_miss_frames >= 20:
+                            drowning_start_time = None
+                            continuous_drowning_frames = 0
+                            drowning_miss_frames = 0
+                        drowning_duration = (current_time - drowning_start_time) if drowning_start_time else 0
 
                     # Set alert type and reason with duration-based Level 2 escalation
                     if effective_level == 2 and drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
@@ -482,32 +618,70 @@ def generate_frames(source):
                             if alert_level == 2:
                                 send_telegram_alert(detection_event)
                     
-                    # Display alert
-                    text_scale = display_width / original_width
-                    
+                    # Display alert banner (top-left, clean pill style)
                     if alert_level == 2:
-                        color = (0, 0, 139)  # Maroon
-                        label = f'DROWNING EMERGENCY: {detected_class_name}'
+                        bg_color    = (0, 0, 160)      # Dark red
+                        accent      = (0, 0, 220)      # Lighter red accent line
+                        icon        = '!! DROWNING'
+                        detail      = f'{detected_class_name}'
                         if drowning_duration > 0:
-                            label += f' | {drowning_duration:.1f}s'
+                            detail += f'  {drowning_duration:.1f}s'
                     else:
-                        color = (0, 165, 255)  # Orange
-                        label = f'RISKY: {detected_class_name}'
-                    
-                    rect_width = int(650 * text_scale)
-                    rect_height = int(65 * text_scale)
-                    cv2.rectangle(annotated_frame, (5, 5), (rect_width, rect_height), color, -1)
-                    cv2.putText(annotated_frame, label, (10, int(45 * text_scale)),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7 * text_scale, (255, 255, 255), 
-                               max(2, int(2 * text_scale)))
+                        bg_color    = (0, 130, 235)    # Orange
+                        accent      = (0, 170, 255)    # Lighter orange accent line
+                        icon        = 'RISKY'
+                        detail      = f'{detected_class_name}  {conf_percentage:.0f}%'
+
+                    pad_x, pad_y = 14, 8
+                    font         = cv2.FONT_HERSHEY_SIMPLEX
+
+                    # Measure text sizes
+                    (iw, ih), _ = cv2.getTextSize(icon,   font, 0.85, 2)
+                    (dw, dh), _ = cv2.getTextSize(detail, font, 0.55, 1)
+
+                    banner_w = max(iw, dw) + pad_x * 2
+                    banner_h = ih + dh + pad_y * 3
+                    bx, by   = 12, 12
+
+                    # Shadow
+                    cv2.rectangle(annotated_frame,
+                                  (bx + 3, by + 3),
+                                  (bx + banner_w + 3, by + banner_h + 3),
+                                  (0, 0, 0), -1)
+                    # Main background
+                    cv2.rectangle(annotated_frame,
+                                  (bx, by),
+                                  (bx + banner_w, by + banner_h),
+                                  bg_color, -1)
+                    # Left accent bar
+                    cv2.rectangle(annotated_frame,
+                                  (bx, by),
+                                  (bx + 5, by + banner_h),
+                                  accent, -1)
+                    # Icon / title text
+                    cv2.putText(annotated_frame, icon,
+                                (bx + pad_x, by + pad_y + ih),
+                                font, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
+                    # Detail text (slightly smaller, slightly transparent-looking)
+                    cv2.putText(annotated_frame, detail,
+                                (bx + pad_x, by + pad_y * 2 + ih + dh),
+                                font, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
                 else:
-                    # Level 0 (Normal) - reset tracking
+                    # Level 0 (smoothed) — count toward grace period
+                    drowning_miss_frames += 1
+                    if drowning_miss_frames >= 20:
+                        drowning_start_time = None
+                        continuous_drowning_frames = 0
+                        drowning_miss_frames = 0
+            else:
+                # No detections this frame — vote Level 0, count toward grace period
+                level_vote_window.append(0)
+                conf_vote_window.append(0.0)
+                drowning_miss_frames += 1
+                if drowning_miss_frames >= 20:
                     drowning_start_time = None
                     continuous_drowning_frames = 0
-            else:
-                # No detections - reset tracking
-                drowning_start_time = None
-                continuous_drowning_frames = 0
+                    drowning_miss_frames = 0
             
             # FPS counter — recalculate every 30 frames, draw every frame
             if frame_count % 30 == 0:
@@ -515,10 +689,7 @@ def generate_frames(source):
                 current_fps = 30 / max(fps_current_time - fps_time, 0.001)
                 fps_time = fps_current_time
 
-            fps_x = display_width - int(160 * (display_width / original_width))
-            cv2.rectangle(annotated_frame, (fps_x, 5), (display_width - 5, 45), (40, 40, 40), -1)
-            cv2.putText(annotated_frame, f'FPS: {current_fps:.1f}', (fps_x + 10, 35),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # FPS is tracked for /get_stats but not drawn on video
             
             last_annotated_frame = annotated_frame
         
@@ -666,11 +837,5 @@ def get_class_mapping():
 
 # ======================== MAIN ========================
 if __name__ == '__main__':
-    print("\n" + "=" * 60)
-    print("🌊 YOLOv11 Drowning Detection Dashboard")
-    print("=" * 60)
-    print("📡 Starting server...")
-    print("🌐 Open: http://localhost:5000")
-    print("✅ Ready!\n")
-    
+    print(f"🌐  http://localhost:5000\n")
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)

@@ -4,24 +4,24 @@
       "name": "Swimming",
       "description": "Normal swimming - safe, no action needed",
       "color": "#2196F3",
-      "classes": ["LVL 0"]
+      "classes": ["Level 0", "LVL 0"]
     },
     "level_1": {
       "name": "Risky",
       "description": "Risky behavior - monitor and be ready to intervene",
       "color": "#ffa500",
-      "classes": ["LVL 1"]
+      "classes": ["Level 1", "LVL 1"]
     },
     "level_2": {
       "name": "Drowning",
       "description": "Drowning - immediate emergency response required",
       "color": "#8b0000",
-      "classes": ["LVL2"]
+      "classes": ["Level 2", "LVL2"]
     }
   },
   "class_descriptions": {
-    "LVL 0": "Safe swimming (model output)",
-    "LVL 1": "Risky behavior (model output)",
-    "LVL2": "Drowning emergency (model output)"
+    "Level 0": "Safe swimming (model output)",
+    "Level 1": "Risky behavior (model output)",
+    "Level 2": "Drowning emergency (model output)"
   }
 }
