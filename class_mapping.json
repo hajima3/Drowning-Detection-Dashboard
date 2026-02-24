@@ -4,24 +4,38 @@
       "name": "Swimming",
       "description": "Normal swimming - safe, no action needed",
       "color": "#2196F3",
-      "classes": ["Level 0", "LVL 0"]
+      "classes": ["Level 0"],
+      "model_output": true,
+      "triggers": "None"
     },
     "level_1": {
       "name": "Risky",
       "description": "Risky behavior - monitor and be ready to intervene",
       "color": "#ffa500",
-      "classes": ["Level 1", "LVL 1"]
+      "classes": ["Level 1"],
+      "model_output": true,
+      "triggers": "Audio beep only"
     },
     "level_2": {
       "name": "Drowning",
-      "description": "Drowning - immediate emergency response required",
+      "description": "EMERGENCY: Drowning detected via temporal escalation - immediate response required",
       "color": "#8b0000",
-      "classes": ["Level 2", "LVL2"]
+      "classes": [],
+      "model_output": false,
+      "temporal_trigger": "Level 1 sustained for 2 seconds continuously",
+      "triggers": "Audio alarm + SMS/Telegram alert"
     }
   },
   "class_descriptions": {
-    "Level 0": "Safe swimming (model output)",
-    "Level 1": "Risky behavior (model output)",
-    "Level 2": "Drowning emergency (model output)"
+    "Level 0": "Safe swimming (direct model detection)",
+    "Level 1": "Risky behavior (direct model detection)",
+    "Level 2": "Drowning emergency (temporal escalation: Level 1 sustained 2s continuously)"
+  },
+  "temporal_logic": {
+    "enabled": true,
+    "escalation_rule": "Level 1 continuous detection for 2 seconds automatically escalates to Level 2",
+    "duration_threshold": 2.0,
+    "grace_period_frames": 20,
+    "description": "Model outputs only Level 0 and Level 1. Application logic monitors Level 1 duration and escalates to Level 2 (Drowning) when sustained risky behavior is detected."
   }
 }

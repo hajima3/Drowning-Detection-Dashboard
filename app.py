@@ -47,7 +47,7 @@ SCALE_FACTOR = float(_cfg("SCALE_FACTOR", 1.0))
 JPEG_QUALITY = int(_cfg("JPEG_QUALITY", 65))                    # JPEG compression quality
 # Lower confidence so borderline detections (0.25-0.5) still show up.
 DEFAULT_CONFIDENCE = float(_cfg("DEFAULT_CONFIDENCE", 0.25))
-LEVEL_2_DURATION_THRESHOLD = float(_cfg("LEVEL_2_DURATION_THRESHOLD", 3.0))
+LEVEL_2_DURATION_THRESHOLD = float(_cfg("LEVEL_2_DURATION_THRESHOLD", 2.0))
 
 # Optional strict-mode thresholds (per-level minimum confidence)
 # Example for very low false positives:
@@ -149,14 +149,18 @@ def send_telegram_alert(detection_event):
 def     get_alert_level_for_class(class_name):
     """Map a detected class name to an alert level.
 
-    3-level system:
-      Level 0 = Swimming  (safe, no action)
-      Level 1 = Risky     (monitor, ready to intervene)
-      Level 2 = Drowning  (immediate emergency)
+    NEW 2-CLASS MODEL + TEMPORAL ESCALATION SYSTEM:
+      Level 0 = Swimming  (safe, no action) - MODEL OUTPUT
+      Level 1 = Risky     (monitor, ready to intervene) - MODEL OUTPUT  
+      Level 2 = Drowning  (immediate emergency) - TEMPORAL ESCALATION ONLY
+      
+    Level 2 is NOT detected by the model directly. Instead, when Level 1
+    is sustained for 2 seconds continuously, the application logic automatically
+    escalates to Level 2 and triggers emergency alerts.
 
     Priority order:
-      1. Direct model output labels (fast path — no JSON lookup needed)
-      2. class_mapping.json lookup (covers all named sub-classes)
+      1. Direct model output labels (Level 0, Level 1)
+      2. class_mapping.json lookup (if configured)
       3. Default to Level 0 if unknown
     """
 
@@ -169,18 +173,7 @@ def     get_alert_level_for_class(class_name):
 
     name_key = normalize_label(class_name)
 
-    # ---- Level 2: Drowning (check first — most critical) ----
-    if name_key in {
-        "drowning", "drown", "drowning_person", "level2_critical",
-        "descending_depth", "distress_signs", "erratic_splashing",
-        "only_limbs_visible", "physical_collapse",
-        "dorwning",   # old model: misspelled
-        "lvl2",       # old model: LVL2
-        "level_2",    # new model: Level 2
-    }:
-        return 2, "Drowning"
-
-    # ---- Level 1: Risky ----
+    # ---- Level 1: Risky (MODEL OUTPUT) ----
     if name_key in {
         "risky", "level1_unsafe", "unsafe", "warning",
         "erratic_unstable_pool_movement",
@@ -188,20 +181,20 @@ def     get_alert_level_for_class(class_name):
         "improper_horizontal_stroke", "improper_movement",
         "improper_swim_wear", "improper_vertical_swimming",
         "unsafe_diving_and_pool_entry",
-        "lvl_1",      # old model: LVL 1
-        "level_1",    # new model: Level 1
+        "lvl_1", "lvl1",      # old model variants
+        "level_1",            # current model: Level 1
     }:
         return 1, "Risky"
 
-    # ---- Level 0: Swimming ----
+    # ---- Level 0: Swimming (MODEL OUTPUT) ----
     if name_key in {
         "swimming", "swimmer", "normal_swimming", "level0_safe", "safe",
         "back_float", "backstroke", "breaststroke", "butterfly", "dog_paddle",
         "freestyle", "side_stroke", "treading_water", "underwater_swimming",
         "vertical_rest", "entering_pool_behavior",
         "movements_allowed_outside_pool", "proper_swim_wear",
-        "lvl_0",      # old model: LVL 0
-        "level_0",    # new model: Level 0
+        "lvl_0", "lvl0",      # old model variants
+        "level_0",            # current model: Level 0
     }:
         return 0, "Swimming"
 
@@ -347,11 +340,12 @@ detection_history = []
 drowning_start_time = None
 continuous_drowning_frames = 0
 drowning_miss_frames = 0   # grace-period counter for timer hysteresis
+level2_triggered = False   # Flag to ensure only ONE Level 2 log & SMS per incident
 
 # ======================== VIDEO PROCESSING ========================
 def generate_frames(source):
     """Generate frames with YOLOv11 detection"""
-    global detection_active, drowning_start_time, continuous_drowning_frames, drowning_miss_frames, current_fps
+    global detection_active, drowning_start_time, continuous_drowning_frames, drowning_miss_frames, current_fps, level2_triggered
     
     # Initialize video capture
     if source == 0:
@@ -526,23 +520,19 @@ def generate_frames(source):
 
                     # Apply per-level confidence floor (uses raw frame conf as gate)
                     effective_level = smoothed_level
-                    if smoothed_level == 2 and LEVEL2_MIN_CONF > 0.0 and max_conf < LEVEL2_MIN_CONF:
-                        # Raw conf too low for Level 2; downgrade if Level 1 conf met
-                        if LEVEL1_MIN_CONF > 0.0 and max_conf >= LEVEL1_MIN_CONF:
-                            effective_level = 1
-                        else:
-                            # Ignore this detection completely
-                            drowning_start_time = None
-                            continuous_drowning_frames = 0
-                            continue
-                    elif smoothed_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
+                    if smoothed_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
                         # Ignore weak Level 1 detections
                         drowning_start_time = None
                         continuous_drowning_frames = 0
                         continue
 
-                    # Track duration for Level 2 behaviors (continuous drowning)
-                    if effective_level == 2:
+                    # ========== NEW TEMPORAL ESCALATION LOGIC ==========
+                    # Track Level 1 duration and escalate to Level 2 when sustained
+                    # Model outputs: Level 0 (Swimming), Level 1 (Risky)
+                    # Application escalates: Level 1 sustained 2s → Level 2 (Drowning)
+                    
+                    if effective_level == 1:
+                        # Level 1 detected - start or continue tracking duration
                         drowning_miss_frames = 0  # clear grace counter
                         if drowning_start_time is None:
                             drowning_start_time = current_time
@@ -551,45 +541,47 @@ def generate_frames(source):
                             continuous_drowning_frames += 1
 
                         drowning_duration = current_time - drowning_start_time
+                        
+                        # TEMPORAL ESCALATION: Level 1 sustained for 2+ seconds → Level 2
+                        if drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
+                            # Escalate to Level 2 (Drowning) - EMERGENCY!
+                            alert_level = 2
+                            alert_type = 'Level 2 - Drowning'
+                            audio_cue = 'alarm'
+                            reason = f'Risky behavior sustained for {drowning_duration:.1f}s - ESCALATED TO DROWNING'
+                            # Only fire if not already triggered for this incident
+                            should_fire = not level2_triggered
+                        else:
+                            # Level 1 building up - show but don't escalate yet
+                            alert_level = 1
+                            alert_type = 'Level 1 - Risky'
+                            audio_cue = 'beep'
+                            reason = f'{detected_class_name} detected ({drowning_duration:.1f}s)'
+                            should_fire = True
                     else:
-                        # Hysteresis: allow up to 20 non-Level-2 frames (~0.67s)
-                        # before resetting the drowning countdown.
+                        # Level 0 (Swimming) - hysteresis grace period before reset
+                        # Allow up to 20 non-Level-1 frames (~0.67s) before resetting timer
                         drowning_miss_frames += 1
                         if drowning_miss_frames >= 20:
                             drowning_start_time = None
                             continuous_drowning_frames = 0
                             drowning_miss_frames = 0
+                            level2_triggered = False  # Reset Level 2 flag when returning to normal
                         drowning_duration = (current_time - drowning_start_time) if drowning_start_time else 0
-
-                    # Set alert type and reason with duration-based Level 2 escalation
-                    if effective_level == 2 and drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
-                        # Full Level 2 emergency — 3+ continuous seconds of drowning
-                        alert_level = 2
-                        alert_type = 'Level 2 - Drowning'
-                        audio_cue = 'alarm'
-                        reason = f'{detected_class_name} detected for {drowning_duration:.1f}s'
-                        should_fire = True
-                    elif effective_level == 2:
-                        # Level 2 building up — silent, waiting for 3s threshold
-                        # No alert, no beep, no log — just keep the timer running
+                        
+                        # Don't fire alert for Level 0 (safe swimming)
                         should_fire = False
-                        audio_cue = 'none'
-                        alert_level = 2
-                        alert_type = 'Level 2 - Drowning'
-                        reason = ''
-                    else:
-                        # Genuine Level 1 — beep only, no SMS
-                        alert_level = 1
-                        alert_type = 'Level 1 - Risky'
-                        audio_cue = 'beep'
-                        reason = f'{detected_class_name} detected'
-                        should_fire = True
                     
                     # Only log and alert if this event should fire
                     if should_fire:
-                        # Avoid duplicate events within 2 seconds of same level
+                        # For Level 2: only log once per incident (level2_triggered flag)
+                        # For Level 1: avoid duplicate events within 2 seconds
                         should_log = True
-                        if detection_history:
+                        if alert_level == 2:
+                            # Level 2: already handled by should_fire check above
+                            should_log = True
+                        elif detection_history:
+                            # Level 1: avoid duplicates within 2 seconds
                             last_detection = detection_history[-1]
                             time_diff = current_time - last_detection['timestamp']
                             if time_diff < 2.0 and last_detection['level'] == alert_level:
@@ -614,22 +606,32 @@ def generate_frames(source):
                             if len(detection_history) > 50:
                                 detection_history.pop(0)
 
-                            # Level 2 >= 3s only: trigger Telegram / SMS alert
+                            # Level 2 >= 2s only: trigger Telegram / SMS alert & set flag
                             if alert_level == 2:
                                 send_telegram_alert(detection_event)
+                                level2_triggered = True  # Mark as triggered to prevent duplicates
                     
                     # Display alert banner (top-left, clean pill style)
                     if alert_level == 2:
+                        # LEVEL 2: DROWNING EMERGENCY (escalated from sustained Level 1)
                         bg_color    = (0, 0, 160)      # Dark red
                         accent      = (0, 0, 220)      # Lighter red accent line
-                        icon        = '!! DROWNING'
-                        detail      = f'{detected_class_name}'
-                        if drowning_duration > 0:
-                            detail += f'  {drowning_duration:.1f}s'
-                    else:
+                        icon        = '!! DROWNING EMERGENCY'
+                        detail      = f'Escalated from risky behavior - {drowning_duration:.1f}s'
+                    elif alert_level == 1:
+                        # LEVEL 1: RISKY (show duration countdown to Level 2)
                         bg_color    = (0, 130, 235)    # Orange
                         accent      = (0, 170, 255)    # Lighter orange accent line
-                        icon        = 'RISKY'
+                        icon        = 'RISKY BEHAVIOR'
+                        if drowning_duration > 0:
+                            detail = f'{detected_class_name}  {conf_percentage:.0f}% - {drowning_duration:.1f}s/{LEVEL_2_DURATION_THRESHOLD:.0f}s'
+                        else:
+                            detail = f'{detected_class_name}  {conf_percentage:.0f}%'
+                    else:
+                        # LEVEL 0: SAFE (shouldn't reach here but handle gracefully)
+                        bg_color    = (220, 180, 0)    # Blue (safe)
+                        accent      = (255, 200, 0)    # Lighter blue
+                        icon        = 'SAFE'
                         detail      = f'{detected_class_name}  {conf_percentage:.0f}%'
 
                     pad_x, pad_y = 14, 8
@@ -673,6 +675,7 @@ def generate_frames(source):
                         drowning_start_time = None
                         continuous_drowning_frames = 0
                         drowning_miss_frames = 0
+                        level2_triggered = False  # Reset Level 2 flag when returning to normal
             else:
                 # No detections this frame — vote Level 0, count toward grace period
                 level_vote_window.append(0)
@@ -682,6 +685,7 @@ def generate_frames(source):
                     drowning_start_time = None
                     continuous_drowning_frames = 0
                     drowning_miss_frames = 0
+                    level2_triggered = False  # Reset Level 2 flag when returning to normal
             
             # FPS counter — recalculate every 30 frames, draw every frame
             if frame_count % 30 == 0:
@@ -722,7 +726,7 @@ def video_feed():
 @app.route('/start_webcam', methods=['POST'])
 def start_webcam():
     """Start webcam detection"""
-    global current_source, detection_active, drowning_start_time, continuous_drowning_frames
+    global current_source, detection_active, drowning_start_time, continuous_drowning_frames, level2_triggered
     
     cap_test = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     cap_test.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -733,6 +737,7 @@ def start_webcam():
     
     drowning_start_time = None
     continuous_drowning_frames = 0
+    level2_triggered = False
     
     current_source = 0
     detection_active = True
@@ -741,17 +746,18 @@ def start_webcam():
 @app.route('/stop_detection', methods=['POST'])
 def stop_detection():
     """Stop detection"""
-    global detection_active, current_source, drowning_start_time, continuous_drowning_frames
+    global detection_active, current_source, drowning_start_time, continuous_drowning_frames, level2_triggered
     detection_active = False
     current_source = None
     drowning_start_time = None
     continuous_drowning_frames = 0
+    level2_triggered = False
     return jsonify({"status": "success", "message": "Detection stopped"})
 
 @app.route('/upload_video', methods=['POST'])
 def upload_video():
     """Upload and process video"""
-    global current_source, detection_active, drowning_start_time, continuous_drowning_frames
+    global current_source, detection_active, drowning_start_time, continuous_drowning_frames, level2_triggered
 
     # Stop any active stream before switching source
     detection_active = False
@@ -777,6 +783,7 @@ def upload_video():
 
         drowning_start_time = None
         continuous_drowning_frames = 0
+        level2_triggered = False
         current_source = filepath
         detection_active = True
 

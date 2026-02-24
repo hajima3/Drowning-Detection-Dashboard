@@ -1,6 +1,6 @@
 {
   "current_model": "best.pt",
-  "classes": ["LVL 0", "LVL 1", "LVL2"],
-  "deployed_date": "2026-02-21",
-  "notes": "3-class model: LVL 0 (Safe), LVL 1 (Risky), LVL2 (Drowning)"
+  "classes": ["Level 0", "Level 1"],
+  "deployed_date": "2026-02-24",
+  "notes": "2-class model: Level 0 (Swimming), Level 1 (Risky). Level 2 (Drowning) is triggered by temporal logic when Level 1 sustained for 2 seconds continuously."
 }

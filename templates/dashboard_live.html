@@ -9,7 +9,7 @@
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(180deg, #001144 0%, #003366 50%, #002244 100%);
-            color: #fff;
+            color: #ffffff;
             min-height: 100vh;
         }
         #koiCanvas {
@@ -32,6 +32,7 @@
             text-align: center;
             padding: 30px 20px;
             background: rgba(255, 255, 255, 0.1);
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
             border-radius: 20px;
             margin-bottom: 30px;
@@ -76,6 +77,7 @@
         }
         .video-section, .controls-section, .card, .logs-container {
             background: rgba(255, 255, 255, 0.1);
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
             border-radius: 15px;
             padding: 25px;
@@ -220,6 +222,17 @@
         .stat-card.success .stat-number { color: #51cf66; }
         .stat-text { font-size: 1em; opacity: 0.9; margin-top: 5px; }
         
+        /* Utility classes */
+        .subtitle-text { opacity: 0.7; font-size: 0.9em; }
+        .center-text { text-align: center; }
+        .small-text { font-size: 0.8em; opacity: 0.8; margin-top: 5px; }
+        .fps-display { font-size: 2em; font-weight: bold; color: #00ff88; }
+        .fps-label { opacity: 0.7; font-size: 0.85em; margin-top: 4px; }
+        .card-title-no-margin { margin: 0; }
+        .overflow-auto { overflow-x: auto; }
+        .empty-state { text-align: center; padding: 40px; opacity: 0.6; }
+        .file-support-text { opacity: 0.7; font-size: 0.9em; margin-top: 10px; text-align: center; }
+        
         .log-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         .log-table th {
             background: rgba(102, 126, 234, 0.3);
@@ -310,7 +323,7 @@
                                 <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z"></path>
                             </svg>
                             <p>No video source active</p>
-                            <p style="opacity: 0.7; font-size: 0.9em;">Start webcam or upload a video</p>
+                            <p class="subtitle-text">Start webcam or upload a video</p>
                         </div>
                     </div>
                 </div>
@@ -326,13 +339,13 @@
                         <h3 class="card-title">📤 Upload Video</h3>
                         <label for="videoUpload" class="file-upload-label">📁 Choose Video File</label>
                         <input type="file" id="videoUpload" accept="video/*" onchange="uploadVideo(this)">
-                        <p style="opacity: 0.7; font-size: 0.9em; margin-top: 10px; text-align: center;">Supports MP4, AVI, MOV</p>
+                        <p class="file-support-text">Supports MP4, AVI, MOV</p>
                     </div>
 
-                    <div class="card" style="text-align: center;">
+                    <div class="card center-text">
                         <h3 class="card-title">📊 Live Stats</h3>
-                        <div style="font-size: 2em; font-weight: bold; color: #00ff88;" id="fpsDisplay">--</div>
-                        <div style="opacity: 0.7; font-size: 0.85em; margin-top: 4px;">Frames per Second</div>
+                        <div class="fps-display" id="fpsDisplay">--</div>
+                        <div class="fps-label">Frames per Second</div>
                     </div>
                 </div>
             </div>
@@ -342,7 +355,7 @@
         <div id="logsTab" class="tab-content">
             <div class="logs-container">
                 <div class="logs-header">
-                    <h2 class="card-title" style="margin: 0;">📋 Drowning Incident Logs</h2>
+                    <h2 class="card-title card-title-no-margin">📋 Drowning Incident Logs</h2>
                     <button class="export-button" onclick="exportLogs()">💾 Export to CSV</button>
                 </div>
 
@@ -350,17 +363,17 @@
                     <div class="stat-card danger">
                         <div class="stat-number" id="level2Count">0</div>
                         <div class="stat-text">🚨 Level 2 Emergencies</div>
-                        <div style="font-size: 0.8em; opacity: 0.8; margin-top: 5px;">Drowning (75%+ confidence)</div>
+                        <div class="small-text">Drowning (75%+ confidence)</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="todayIncidentsCount">0</div>
                         <div class="stat-text">📅 Today's Incidents</div>
-                        <div style="font-size: 0.8em; opacity: 0.8; margin-top: 5px;">All alerts today</div>
+                        <div class="small-text">All alerts today</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="totalLogsCount">0</div>
                         <div class="stat-text">📊 Total Alerts</div>
-                        <div style="font-size: 0.8em; opacity: 0.8; margin-top: 5px;">All time records</div>
+                        <div class="small-text">All time records</div>
                     </div>
                 </div>
 
@@ -372,7 +385,7 @@
                     <button class="filter-button danger" onclick="clearAllLogs()">🗑️ Clear All Logs</button>
                 </div>
 
-                <div style="overflow-x: auto;">
+                <div class="overflow-auto">
                     <table class="log-table">
                         <thead>
                             <tr>
@@ -386,7 +399,7 @@
                             </tr>
                         </thead>
                         <tbody id="logsTableBody">
-                            <tr><td colspan="7" style="text-align: center; padding: 40px; opacity: 0.6;">No incidents logged yet.</td></tr>
+                            <tr><td colspan="7" class="empty-state">No incidents logged yet.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -764,54 +777,46 @@
 
         // Automatic detection polling and logging
         let detectionPollingInterval = null;
+        let level1Audio = null;  // Level 1 beep MP3 (loaded on demand)
         let level2Audio = null;  // Level 2 alarm MP3 (loaded on demand)
         
         // ---- Audio engine ----
-        // Level 1 (Risky): short beep generated via Web Audio API — no file needed
-        // Level 2 (Drowning, >=3s): plays level2.mp3 alarm file
+        // Level 1 (Risky): plays level1.mp3 file once
+        // Level 2 (Drowning, >=2s): plays level2.mp3 alarm file in continuous loop until stopped
         let _audioCtx = null;
         function _getAudioCtx() {
             if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             return _audioCtx;
         }
 
-        function playBeep() {
-            // Short 880 Hz beep, 200 ms — Level 1 authority alert
-            try {
-                const ctx = _getAudioCtx();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.type = 'sine';
-                osc.frequency.setValueAtTime(880, ctx.currentTime);
-                gain.gain.setValueAtTime(0.6, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
-                osc.start(ctx.currentTime);
-                osc.stop(ctx.currentTime + 0.2);
-            } catch (e) {
-                console.log('Beep failed:', e);
-            }
-        }
-
         function initAlertSounds() {
+            if (!level1Audio) {
+                level1Audio = new Audio('/static/audio/level1.mp3');
+                level1Audio.volume = 0.8;
+            }
             if (!level2Audio) {
                 level2Audio = new Audio('/static/audio/level2.mp3');
                 level2Audio.volume = 1.0;
+                level2Audio.loop = true;  // Loop continuously until stopped
             }
         }
 
         // Play sound based on the `audio` field returned from the backend:
-        //   'beep'  → Level 1 short tone (no SMS, authority alert only)
-        //   'alarm' → Level 2 full siren (SMS + alarm, >=3s drowning confirmed)
+        //   'beep'  → Level 1 short tone (level1.mp3, no SMS, authority alert only)
+        //   'alarm' → Level 2 full siren (level2.mp3 LOOPING, SMS + alarm, >=2s drowning confirmed)
         //   'none'  → silence
         function playAlertSound(audioCue) {
             try {
                 if (audioCue === 'beep') {
-                    playBeep();
+                    initAlertSounds();
+                    if (level1Audio) {
+                        level1Audio.currentTime = 0;
+                        level1Audio.play().catch(err => console.log('Level 1 audio failed:', err));
+                    }
                 } else if (audioCue === 'alarm') {
                     initAlertSounds();
-                    if (level2Audio) {
+                    if (level2Audio && level2Audio.paused) {
+                        // Only start if not already playing (prevents restarting during loop)
                         level2Audio.currentTime = 0;
                         level2Audio.play().catch(err => console.log('Alarm audio failed:', err));
                     }
@@ -825,6 +830,10 @@
         // Stop any currently playing alert sounds
         function stopAlertSounds() {
             try {
+                if (level1Audio) {
+                    level1Audio.pause();
+                    level1Audio.currentTime = 0;
+                }
                 if (level2Audio) {
                     level2Audio.pause();
                     level2Audio.currentTime = 0;

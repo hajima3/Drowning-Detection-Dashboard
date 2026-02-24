@@ -3,7 +3,7 @@
   "scale_factor": 1.0,
   "jpeg_quality": 75,
   "default_confidence": 0.40,
-  "level2_duration_threshold": 1.5,
+  "level2_duration_threshold": 2.0,
   "target_fps": 30,
   "yolo_imgsz": 640,
   "level1_min_conf": 0.60,
