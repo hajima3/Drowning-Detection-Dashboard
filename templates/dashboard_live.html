@@ -781,8 +781,8 @@
         let level2Audio = null;  // Level 2 alarm MP3 (loaded on demand)
         
         // ---- Audio engine ----
-        // Level 1 (Risky): plays level1.mp3 file once
-        // Level 2 (Drowning, >=2s): plays level2.mp3 alarm file in continuous loop until stopped
+        // Level 1 (Risky): plays level1.mp3 once per event
+        // Level 2 (Drowning, >=5s temporal OR direct model detection): plays level2.mp3 in continuous loop until stopped
         let _audioCtx = null;
         function _getAudioCtx() {
             if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -802,8 +802,8 @@
         }
 
         // Play sound based on the `audio` field returned from the backend:
-        //   'beep'  → Level 1 short tone (level1.mp3, no SMS, authority alert only)
-        //   'alarm' → Level 2 full siren (level2.mp3 LOOPING, SMS + alarm, >=2s drowning confirmed)
+        //   'beep'  → Level 1 short tone (level1.mp3)
+        //   'alarm' → Level 2 full siren (level2.mp3 LOOPING — fires on 5s temporal escalation OR direct Level2_Critical)
         //   'none'  → silence
         function playAlertSound(audioCue) {
             try {
