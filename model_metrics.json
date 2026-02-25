@@ -45,5 +45,5 @@
     "Physical Collapse":                          2,
     "Level2_Critical":                            2
   },
-  "notes": "28-class model. Output is consolidated to 3 alert levels. Level 2 fires directly when Level2_Critical or Physical Collapse is detected, OR when Level 1 is sustained for 2 seconds (temporal escalation)."
+  "notes": "28-class model. Output is consolidated to 3 alert levels. Level 2 fires directly when Level2_Critical or Physical Collapse is detected at >=80% conf, OR when Level 1 is sustained for 5 seconds (temporal escalation). Anti-false-positive: smoothing window requires 60% of last 15 frames to vote Level 1 before timer starts."
 }

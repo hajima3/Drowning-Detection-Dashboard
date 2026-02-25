@@ -4,17 +4,29 @@ Real-time pool safety monitoring with 3-level alert system
 
 28-class model consolidated to 3 output levels:
   Level 0 - Swimming  (14 classes): safe, no action
-  Level 1 - Risky     (12 classes): monitor, audio beep, 5s escalation timer
+  Level 1 - Risky     (12 classes): monitor, audio beep, starts 5s escalation timer
   Level 2 - Drowning  ( 2 classes): immediate emergency, alarm + Telegram
     Fires via: (a) direct model detection (Level2_Critical / Physical Collapse, conf >= 80%)
-               (b) temporal escalation   (Level 1 sustained >= 5 seconds, conf >= 80%)
+               (b) temporal escalation   (Level 1 OR downgraded Level 2 sustained >= 5s)
+                   Anti-false-positive: smoothing window requires 60% of last 15 frames
+                   (~9 frames) to vote Level 1 before the timer starts.
 
 10/20 Rule applied:
   - Level 1 must be sustained 5s before escalating (identification window)
   - 20-second response countdown shown on screen once Level 2 fires
 """
 
+import logging
+import sys
+
+# ── Silence noisy third-party loggers before anything else imports them ──────
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+logging.getLogger('ultralytics').setLevel(logging.WARNING)
+
 from flask import Flask, render_template, Response, request, jsonify
+import flask.cli
+flask.cli.show_server_banner = lambda *args, **kwargs: None   # hide Flask startup banner
+
 from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 import cv2
@@ -279,13 +291,14 @@ def _smoothed_alert_level(level_window, conf_window):
 
     Asymmetric thresholds (safety-first):
       Level 2 fires if it holds >= 35% of weighted votes  (~5-6 / 15 frames)
-      Level 1 fires if it holds >= 40% of weighted votes  (~6 / 15 frames)
+      Level 1 fires if it holds >= 60% of weighted votes  (~9 / 15 frames)
       Otherwise Level 0.
 
     Rationale (tuned to best.pt's 87.7% recall, 82% precision, 28 classes):
-      - Level 1 at 40%: responsive to real risky behavior; 12 Level 1 classes
-        produce varied labels frame-to-frame so a lower threshold is needed
-        to accumulate enough votes while staying robust against single noisy frames.
+      - Level 1 at 60%: any detected Level 1 OR Level 2 class starts the
+        escalation timer, so the threshold is raised to 60% (9/15 frames)
+        to guard against brief/noisy detections. A genuine sustained risky
+        event will easily hold 60%; a glancing false-positive will not.
       - Level 2 at 35%: kept lower because the 80% confidence gate and
         level2_triggered flag already control false Level 2 alerts.
       - A single noisy frame (1/15 = 6.7%) still cannot flip either state.
@@ -308,10 +321,10 @@ def _smoothed_alert_level(level_window, conf_window):
     l1_frac = level_weights.get(1, 0.0) / total_weight
 
     # Level 2 needs 35% weighted votes  (~5-6 / 15 frames)
-    # Level 1 needs 40% weighted votes  (~6 / 15 frames) — tuned for 12-class Level 1 pool
+    # Level 1 needs 60% weighted votes  (~9 / 15 frames) — raised to reduce false positives
     if l2_frac >= 0.35:
         return 2
-    if l1_frac >= 0.40:
+    if l1_frac >= 0.60:
         return 1
     return 0
 
@@ -387,13 +400,16 @@ def _load_model():
             if candidate.exists():
                 model_path = str(candidate)
                 break
-    m = YOLO(model_path)
+    # Load model silently — suppress YOLO's own verbose output
+    m = YOLO(model_path, verbose=False)
     try:
+        _devnull = open(os.devnull, 'w')
+        _old_stdout, sys.stdout = sys.stdout, _devnull
         m.fuse()
+        sys.stdout = _old_stdout
+        _devnull.close()
     except Exception:
-        pass
-    classes = list(m.names.values())
-    print(f"🌊  Drowning Detection  |  {Path(model_path).name}  |  {' / '.join(classes)}")
+        sys.stdout = _old_stdout if '_old_stdout' in dir() else sys.stdout
     return m
 
 model = _load_model()
@@ -550,7 +566,7 @@ def generate_frames(source):
                     alert_level, _ = get_alert_level_for_class(class_name)
 
                     # Confidence downgrade: Level 2 below 80% → treat as Level 1
-                    # (affects box color AND smoothing vote)
+                    # (affects box colour AND smoothing vote)
                     if alert_level == 2 and conf < 0.80:
                         alert_level = 1
 
@@ -609,6 +625,15 @@ def generate_frames(source):
                     #
                     # CONFIDENCE DOWNGRADE: if effective_level is 2 but confidence
                     # is below 80%, treat it as Level 1 (risky) instead.
+
+                    # Safety defaults — ensure every variable is bound regardless of branch
+                    alert_level      = 0
+                    alert_type       = 'Level 0 - Safe'
+                    audio_cue        = 'none'
+                    reason           = ''
+                    drowning_duration = 0.0
+                    should_fire      = False
+
                     if effective_level == 2 and max_conf < 0.80:
                         effective_level = 1  # downgrade — not confident enough for critical
 
@@ -624,8 +649,11 @@ def generate_frames(source):
                         should_fire = not level2_triggered
 
                     elif effective_level == 1:
-                        # Level 1 detected — start or continue tracking duration
-                        drowning_miss_frames = 0  # clear grace counter
+                        # Level 1 OR downgraded Level 2 — start/continue escalation timer.
+                        # False-positive protection: the smoothing window requires 60% of
+                        # the last 15 frames (~9 frames) to vote Level 1 before we reach
+                        # here, so brief/noisy detections never start the timer.
+                        drowning_miss_frames = 0
                         if drowning_start_time is None:
                             drowning_start_time = current_time
                             continuous_drowning_frames = 1
@@ -634,24 +662,19 @@ def generate_frames(source):
 
                         drowning_duration = current_time - drowning_start_time
 
-                        # TEMPORAL ESCALATION: Level 1 sustained for 5+ seconds → Level 2
+                        # TEMPORAL ESCALATION: sustained risky for 5+ seconds → Level 2
                         if drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
-                            # Escalate to Level 2 (Drowning) - EMERGENCY!
                             alert_level = 2
                             alert_type = 'Level 2 - Drowning'
                             audio_cue = 'alarm'
                             reason = f'Risky behavior sustained for {drowning_duration:.1f}s - ESCALATED TO DROWNING'
-                            # Fire once per incident.
-                            # NOTE: No 80% conf gate here — the 5s sustained duration IS
-                            # the quality gate for temporal escalation. The 80% gate only
-                            # applies to direct Level2_Critical / Physical Collapse detections.
                             should_fire = not level2_triggered
                         else:
-                            # Level 1 building up - show but don't escalate yet
+                            # Timer running — show Level 1 alert with countdown
                             alert_level = 1
                             alert_type = 'Level 1 - Risky'
                             audio_cue = 'beep'
-                            reason = f'{detected_class_name} detected ({drowning_duration:.1f}s)'
+                            reason = f'{detected_class_name} detected ({drowning_duration:.1f}s / {LEVEL_2_DURATION_THRESHOLD:.0f}s)'
                             should_fire = True
                     else:
                         # Level 0 (Swimming) - hysteresis grace period before reset
@@ -956,5 +979,13 @@ def get_class_mapping():
 
 # ======================== MAIN ========================
 if __name__ == '__main__':
-    print(f"🌐  http://localhost:5000\n")
+    # Clean startup banner
+    n_classes = len(model.names) if hasattr(model, 'names') else '?'
+    print("")
+    print("  ╔══════════════════════════════════════════╗")
+    print("  ║   🌊  Drowning Detection Dashboard        ║")
+    print(f"  ║   📦  Model : best.pt  |  {n_classes} classes       ║")
+    print("  ║   🌐  http://localhost:5000               ║")
+    print("  ╚══════════════════════════════════════════╝")
+    print("")
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
