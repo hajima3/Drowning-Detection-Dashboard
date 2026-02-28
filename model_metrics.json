@@ -1,49 +1,24 @@
-{
+﻿{
   "current_model": "best.pt",
-  "total_classes": 28,
-  "deployed_date": "2026-02-24",
+  "total_classes": 3,
+  "classes": ["swimming", "floating", "drowning"],
+  "deployed_date": "2026-02-28",
   "training": {
-    "epochs": 150,
-    "mAP50": 0.84169,
-    "mAP50_95": 0.51638,
-    "precision": 0.82093,
-    "recall": 0.87652,
-    "parameters": 25332068
+    "epochs": 50,
+    "mAP50": 0.9867,
+    "mAP50_95": 0.73482,
+    "precision": 0.95798,
+    "recall": 0.97787,
+    "parameters": 25312793
   },
   "alert_levels": {
-    "Level 0": "Safe / Normal Swimming",
-    "Level 1": "Risky / Unsafe Behavior",
-    "Level 2": "Critical / Drowning Emergency"
+    "Level 0": "Safe — swimming or floating detected. No action.",
+    "Level 1": "Drowning detected at >= 40% confidence. Audio beep plays. 5-second escalation timer starts.",
+    "Level 2": "EMERGENCY — drowning sustained for 5 seconds. Audio alarm loops. Telegram alert dispatched. 20s response countdown."
   },
   "class_to_level": {
-    "Back Float":                                 0,
-    "Backstroke":                                 0,
-    "Breaststroke":                               0,
-    "Butterfly":                                  0,
-    "Dog Paddle":                                 0,
-    "Freestyle":                                  0,
-    "Side Stroke":                                0,
-    "Treading Water":                             0,
-    "Underwater Swimming":                        0,
-    "Vertical Rest":                              0,
-    "Proper Swim Wear":                           0,
-    "Entering Pool Behavior":                     0,
-    "Movements Allowed Outside Pool":             0,
-    "Level0_Safe":                                0,
-    "Descending Depth":                           1,
-    "Distress Signs":                             1,
-    "Erratic / Unstable Pool Movement":           1,
-    "Erratic Splashing":                          1,
-    "Improper Advanced / Coordinated Swimming":   1,
-    "Improper Horizontal Stroke":                 1,
-    "Improper Movement":                          1,
-    "Improper Swim Wear":                         1,
-    "Improper Vertical Swimming":                 1,
-    "Only Limbs Visible":                         1,
-    "Unsafe Diving And Pool Entry":               1,
-    "Level1_Unsafe":                              1,
-    "Physical Collapse":                          2,
-    "Level2_Critical":                            2
-  },
-  "notes": "28-class model. Output is consolidated to 3 alert levels. Level 2 fires directly when Level2_Critical or Physical Collapse is detected at >=80% conf, OR when Level 1 is sustained for 5 seconds (temporal escalation). Anti-false-positive: smoothing window requires 60% of last 15 frames to vote Level 1 before timer starts."
+    "swimming": 0,
+    "floating": 0,
+    "drowning": 1
+  }
 }

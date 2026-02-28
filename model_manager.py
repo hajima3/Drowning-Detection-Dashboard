@@ -1,5 +1,5 @@
 """
-Model Manager -- update deployed model info in model_metrics.json
+Model Manager — view or update deployed model info in model_metrics.json
 
 Usage:
   python model_manager.py                        # Show current model info
@@ -14,7 +14,7 @@ METRICS_FILE = Path(__file__).parent / "model_metrics.json"
 
 
 def load_metrics():
-    with open(METRICS_FILE, 'r') as f:
+    with open(METRICS_FILE) as f:
         return json.load(f)
 
 
@@ -24,21 +24,26 @@ def save_metrics(data):
 
 
 def show_info():
-    data = load_metrics()
-    print("\n=== Deployed Model ===")
-    print(f"  File:    {data.get('current_model', 'unknown')}")
-    print(f"  Classes: {', '.join(data.get('classes', []))}")
-    print(f"  Date:    {data.get('deployed_date', 'unknown')}")
-    print(f"  Notes:   {data.get('notes', '')}")
+    d = load_metrics()
+    print()
+    print("=== Deployed Model ===")
+    print(f"  File    : {d.get('current_model', 'unknown')}")
+    print(f"  Classes : {', '.join(d.get('classes', []))}")
+    print(f"  Date    : {d.get('deployed_date', 'unknown')}")
+    training = d.get('training', {})
+    if training:
+        print(f"  mAP50   : {training.get('mAP50', 'N/A')}")
+        print(f"  Recall  : {training.get('recall', 'N/A')}")
     print()
 
 
 def deploy(model_name, notes=""):
-    data = load_metrics()
-    data["current_model"] = model_name
-    data["deployed_date"] = datetime.now().strftime("%Y-%m-%d")
-    data["notes"] = notes
-    save_metrics(data)
+    d = load_metrics()
+    d["current_model"] = model_name
+    d["deployed_date"] = datetime.now().strftime("%Y-%m-%d")
+    if notes:
+        d["notes"] = notes
+    save_metrics(d)
     print(f"Deployed: {model_name}")
     show_info()
 
@@ -51,3 +56,4 @@ if __name__ == "__main__":
         deploy(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
     else:
         print(__doc__)
+

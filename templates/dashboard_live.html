@@ -122,26 +122,6 @@
         button.danger { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
         button.success { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
         
-        .slider-container { margin: 20px 0; }
-        .slider-container label { display: block; margin-bottom: 10px; font-size: 1.1em; }
-        input[type="range"] {
-            width: 100%;
-            height: 8px;
-            border-radius: 5px;
-            background: rgba(255, 255, 255, 0.2);
-            outline: none;
-            -webkit-appearance: none;
-        }
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background: #88ccff;
-            cursor: pointer;
-        }
-        .confidence-value { text-align: center; font-size: 1.5em; font-weight: bold; color: #88ccff; margin-top: 10px; }
         input[type="file"] { display: none; }
         .file-upload-label {
             display: block;
@@ -214,12 +194,8 @@
             text-align: center;
         }
         .stat-card.danger { background: rgba(220, 53, 69, 0.3); border: 2px solid rgba(220, 53, 69, 0.5); }
-        .stat-card.warning { background: rgba(255, 165, 0, 0.3); border: 2px solid rgba(255, 165, 0, 0.5); }
-        .stat-card.success { background: rgba(40, 167, 69, 0.3); border: 2px solid rgba(40, 167, 69, 0.5); }
         .stat-number { font-size: 2.5em; font-weight: bold; color: #88ccff; }
         .stat-card.danger .stat-number { color: #ff6b6b; }
-        .stat-card.warning .stat-number { color: #ffa500; }
-        .stat-card.success .stat-number { color: #51cf66; }
         .stat-text { font-size: 1em; opacity: 0.9; margin-top: 5px; }
         
         /* Utility classes */
@@ -299,7 +275,7 @@
     <div class="container">
         <header>
             <h1>🏊 YOLOv11 Drowning Detection Dashboard</h1>
-            <p class="subtitle">Real-time Detection with AI-Powered Safety Monitoring & Incident Logging</p>
+            <p class="subtitle">Real-time AI drowning detection — 10/20 Protection Standard: 10s Detect · 20s Respond</p>
         </header>
 
         <div id="alertBox"></div>
@@ -363,7 +339,7 @@
                     <div class="stat-card danger">
                         <div class="stat-number" id="level2Count">0</div>
                         <div class="stat-text">🚨 Level 2 Emergencies</div>
-                        <div class="small-text">Drowning (75%+ confidence)</div>
+                        <div class="small-text">Sustained 5s drowning — 20s response window activated</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="todayIncidentsCount">0</div>
@@ -408,9 +384,7 @@
 
     </div>
 
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
-        // Koi animation
         const canvas = document.getElementById('koiCanvas');
         const ctx = canvas.getContext('2d');
         canvas.width = window.innerWidth;
@@ -461,7 +435,6 @@
             canvas.height = window.innerHeight;
         });
 
-        // Tab switching
         function switchTab(tab) {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
@@ -475,7 +448,7 @@
             }
         }
 
-        // Logging system
+        // Logs
         let incidentLogs = JSON.parse(localStorage.getItem('drowningLogs')) || [];
         let logIdCounter = parseInt(localStorage.getItem('logIdCounter')) || 1;
         let currentFilter = 'all';
@@ -500,8 +473,6 @@
 
             if (currentFilter === 'level2') {
                 filteredLogs = incidentLogs.filter(log => log.type.includes('Level 2'));
-            } else if (currentFilter === 'level1') {
-                filteredLogs = incidentLogs.filter(log => log.type.includes('Level 1'));
             } else if (currentFilter === 'today') {
                 const today = new Date().toDateString();
                 filteredLogs = incidentLogs.filter(log => new Date(log.timestamp).toDateString() === today);
@@ -577,10 +548,8 @@
                     localStorage.setItem('drowningLogs', JSON.stringify(incidentLogs));
                     updateLogsDisplay();
                     showAlert('🗑️ Log deleted successfully', 'success');
-                    console.log(`✅ Deleted log #${id}`);
                 } else {
                     showAlert('❌ Failed to delete log', 'error');
-                    console.error(`❌ Failed to find log #${id}`);
                 }
             }
         }
@@ -640,7 +609,6 @@
         function onRowCheckbox(checkbox) {
             const row = checkbox.closest('tr');
             if (row) row.classList.toggle('selected', checkbox.checked);
-            // Sync Select-All header state
             const all = document.querySelectorAll('.log-checkbox');
             const checked = document.querySelectorAll('.log-checkbox:checked');
             const hdr = document.getElementById('selectAllHeader');
@@ -666,7 +634,6 @@
             }
         }
 
-        // Detection functions
         function showAlert(message, type = 'success') {
             const alertBox = document.getElementById('alertBox');
             alertBox.innerHTML = `<div class="alert ${type}">${message}</div>`;
@@ -678,16 +645,11 @@
                 const response = await fetch('/start_webcam', { method: 'POST' });
                 const data = await response.json();
                 if (data.status === 'success') {
-                    // Force reload video feed with cache bust
                     const timestamp = new Date().getTime();
                     document.getElementById('videoContainer').innerHTML = `<img id="videoFeed" src="/video_feed?t=${timestamp}">`;
                     document.getElementById('statusIndicator').className = 'status-indicator active';
                     showAlert('✅ Webcam started!', 'success');
-                    
-                    // Stop any playing alert audio when switching source
                     stopAlertSounds();
-                    
-                    // Start automatic detection polling
                     startDetectionPolling();
                 }
             } catch (error) {
@@ -710,11 +672,7 @@
                     `;
                     document.getElementById('statusIndicator').className = 'status-indicator inactive';
                     showAlert('⏹️ Detection stopped', 'success');
-                    
-                    // Stop automatic detection polling
                     stopDetectionPolling();
-
-                    // Stop any playing alert audio
                     stopAlertSounds();
                 }
             } catch (error) {
@@ -726,14 +684,12 @@
             if (!input.files || !input.files[0]) return;
             const file = input.files[0];
 
-            // Client-side 500 MB guard
             if (file.size > 500 * 1024 * 1024) {
                 showAlert('❌ File too large (max 500 MB)', 'error');
                 input.value = '';
                 return;
             }
 
-            // Stop current stream before uploading
             stopDetectionPolling();
             stopAlertSounds();
             try { await fetch('/stop_detection', { method: 'POST' }); } catch (_) {}
@@ -764,30 +720,9 @@
             input.value = '';
         }
 
-        async function updateConfidence(value) {
-            document.getElementById('confidenceValue').textContent = value + '%';
-            try {
-                await fetch('/set_confidence', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ confidence: value })
-                });
-            } catch (error) {}
-        }
-
-        // Automatic detection polling and logging
         let detectionPollingInterval = null;
-        let level1Audio = null;  // Level 1 beep MP3 (loaded on demand)
-        let level2Audio = null;  // Level 2 alarm MP3 (loaded on demand)
-        
-        // ---- Audio engine ----
-        // Level 1 (Risky): plays level1.mp3 once per event
-        // Level 2 (Drowning, >=5s temporal OR direct model detection): plays level2.mp3 in continuous loop until stopped
-        let _audioCtx = null;
-        function _getAudioCtx() {
-            if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            return _audioCtx;
-        }
+        let level1Audio = null;
+        let level2Audio = null;
 
         function initAlertSounds() {
             if (!level1Audio) {
@@ -797,14 +732,10 @@
             if (!level2Audio) {
                 level2Audio = new Audio('/static/audio/level2.mp3');
                 level2Audio.volume = 1.0;
-                level2Audio.loop = true;  // Loop continuously until stopped
+                level2Audio.loop = true;
             }
         }
 
-        // Play sound based on the `audio` field returned from the backend:
-        //   'beep'  → Level 1 short tone (level1.mp3)
-        //   'alarm' → Level 2 full siren (level2.mp3 LOOPING — fires on 5s temporal escalation OR direct Level2_Critical)
-        //   'none'  → silence
         function playAlertSound(audioCue) {
             try {
                 if (audioCue === 'beep') {
@@ -816,18 +747,15 @@
                 } else if (audioCue === 'alarm') {
                     initAlertSounds();
                     if (level2Audio && level2Audio.paused) {
-                        // Only start if not already playing (prevents restarting during loop)
                         level2Audio.currentTime = 0;
                         level2Audio.play().catch(err => console.log('Alarm audio failed:', err));
                     }
                 }
-                // 'none' or unknown → do nothing
             } catch (error) {
                 console.log('Alert sound error:', error);
             }
         }
 
-        // Stop any currently playing alert sounds
         function stopAlertSounds() {
             try {
                 if (level1Audio) {
@@ -858,38 +786,18 @@
 
                 if (data.status === 'success' && data.detections && data.detections.length > 0) {
                     data.detections.forEach(detection => {
-                        // Only log Level 2 (Drowning) emergencies — Level 1 is audio-only
+                        if (detection.level === 2) addLog(detection.type, detection.confidence);
+                        if (detection.audio && detection.audio !== 'none') playAlertSound(detection.audio);
+
                         if (detection.level === 2) {
-                            addLog(detection.type, detection.confidence);
-                        }
-
-                        // Play sound based on audio cue field from backend:
-                        //   'beep'  = Level 1 authority alert (beep only)
-                        //   'alarm' = Level 2 full emergency (>=3s confirmed)
-                        //   'none'  = silence
-                        if (detection.audio && detection.audio !== 'none') {
-                            playAlertSound(detection.audio);
-                        }
-
-                        const isLevel2 = detection.level === 2;
-
-                        // For Level 2, also show prominent on-screen alert and browser notification
-                        if (isLevel2) {
                             const alertType = 'error';
                             const emoji = '🚨';
-                            const title = 'LEVEL 2 EMERGENCY';
-                            const message = `Drowning emergency detected! Confidence: ${detection.confidence}%. Contact medical authorities immediately!`;
-
-                            // Show prominent alert only for Level 2
+                            const title = '10/20 STANDARD — LEVEL 2 EMERGENCY';
+                            const message = `Drowning confirmed! ${detection.confidence}% confidence sustained 10s. 20-SECOND RESPONSE WINDOW ACTIVE — reach victim now!`;
                             showAlert(`${emoji} ${message}`, alertType);
-
-                            // Browser notification (if permitted)
                             if ('Notification' in window && Notification.permission === 'granted') {
                                 new Notification(`${emoji} ${title}`, {
-                                    body: message,
-                                    icon: emoji,
-                                    requireInteraction: true, // Force interaction for Level 2
-                                    tag: 'emergency'
+                                    body: message, icon: emoji, requireInteraction: true, tag: 'emergency'
                                 });
                             }
                         }
@@ -900,37 +808,16 @@
             }
         }
         
-        // Request notification permission on page load
-        if ('Notification' in window && Notification.permission === 'default') {
-            Notification.requestPermission();
-        }
-        
-        // Start polling when webcam/video starts
+        if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+
         function startDetectionPolling() {
-            if (!detectionPollingInterval) {
-                detectionPollingInterval = setInterval(checkForDetections, 1000);
-            }
+            if (!detectionPollingInterval) detectionPollingInterval = setInterval(checkForDetections, 1000);
         }
 
-        // Stop polling when detection stops
         function stopDetectionPolling() {
-            if (detectionPollingInterval) {
-                clearInterval(detectionPollingInterval);
-                detectionPollingInterval = null;
-            }
+            if (detectionPollingInterval) { clearInterval(detectionPollingInterval); detectionPollingInterval = null; }
         }
         
-        // Test functions - you can call these manually in browser console
-        function testLevel1() {
-            addLog('Level 1 - Unsafe Movement', 65);
-            console.log('✅ Test Level 1 warning added');
-        }
-        
-        function testLevel2() {
-            addLog('Level 2 - Drowning Emergency', 85);
-            console.log('✅ Test Level 2 emergency added');
-        }
-
         updateLogsDisplay();
     </script>
 </body>

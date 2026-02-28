@@ -1,97 +1,13 @@
 {
+  "model": "best.pt",
+  "classes": {
+    "0": { "name": "swimming", "alert_level": 0, "action": "safe" },
+    "1": { "name": "floating",  "alert_level": 0, "action": "safe" },
+    "2": { "name": "drowning",  "alert_level": 1, "action": "escalate" }
+  },
   "alert_levels": {
-    "level_0": {
-      "name": "Swimming",
-      "description": "Normal swimming - safe, no action needed",
-      "color": "#2196F3",
-      "model_output": true,
-      "triggers": "None",
-      "classes": [
-        "Back Float",
-        "Backstroke",
-        "Breaststroke",
-        "Butterfly",
-        "Dog Paddle",
-        "Freestyle",
-        "Side Stroke",
-        "Treading Water",
-        "Underwater Swimming",
-        "Vertical Rest",
-        "Proper Swim Wear",
-        "Entering Pool Behavior",
-        "Movements Allowed Outside Pool",
-        "Level0_Safe"
-      ]
-    },
-    "level_1": {
-      "name": "Risky",
-      "description": "Risky behavior - monitor and be ready to intervene",
-      "color": "#ffa500",
-      "model_output": true,
-      "triggers": "Audio beep only",
-      "classes": [
-        "Descending Depth",
-        "Distress Signs",
-        "Erratic / Unstable Pool Movement",
-        "Erratic Splashing",
-        "Improper Advanced / Coordinated Swimming",
-        "Improper Horizontal Stroke",
-        "Improper Movement",
-        "Improper Swim Wear",
-        "Improper Vertical Swimming",
-        "Only Limbs Visible",
-        "Unsafe Diving And Pool Entry",
-        "Level1_Unsafe"
-      ]
-    },
-    "level_2": {
-      "name": "Drowning",
-      "description": "EMERGENCY: Drowning detected directly by model or via temporal escalation - immediate response required",
-      "color": "#8b0000",
-      "model_output": true,
-      "temporal_trigger": "Level 1 sustained for 2 seconds continuously",
-      "triggers": "Audio alarm + SMS/Telegram alert",
-      "classes": [
-        "Physical Collapse",
-        "Level2_Critical"
-      ]
-    }
-  },
-  "class_descriptions": {
-    "Back Float":                               "Safe swimming position (Level 0)",
-    "Backstroke":                               "Safe swimming stroke (Level 0)",
-    "Breaststroke":                             "Safe swimming stroke (Level 0)",
-    "Butterfly":                                "Safe swimming stroke (Level 0)",
-    "Dog Paddle":                               "Safe basic swimming (Level 0)",
-    "Freestyle":                                "Safe swimming stroke (Level 0)",
-    "Side Stroke":                              "Safe swimming stroke (Level 0)",
-    "Treading Water":                           "Safe stationary swimming (Level 0)",
-    "Underwater Swimming":                      "Safe underwater movement (Level 0)",
-    "Vertical Rest":                            "Safe resting in water (Level 0)",
-    "Proper Swim Wear":                         "Properly equipped swimmer (Level 0)",
-    "Entering Pool Behavior":                   "Normal pool entry (Level 0)",
-    "Movements Allowed Outside Pool":           "Permitted movement around pool (Level 0)",
-    "Level0_Safe":                              "Model direct safe output (Level 0)",
-    "Descending Depth":                         "Abnormal depth descent - risky (Level 1)",
-    "Distress Signs":                           "Visible distress behavior (Level 1)",
-    "Erratic / Unstable Pool Movement":         "Unstable erratic movement (Level 1)",
-    "Erratic Splashing":                        "Panic-like splashing (Level 1)",
-    "Improper Advanced / Coordinated Swimming": "Unsafe advanced technique (Level 1)",
-    "Improper Horizontal Stroke":               "Incorrect dangerous stroke (Level 1)",
-    "Improper Movement":                        "Unsafe body movement (Level 1)",
-    "Improper Swim Wear":                       "Unsuitable swim attire (Level 1)",
-    "Improper Vertical Swimming":               "Dangerous vertical position (Level 1)",
-    "Only Limbs Visible":                       "Body submerged - limbs only visible (Level 1)",
-    "Unsafe Diving And Pool Entry":             "Dangerous dive or entry (Level 1)",
-    "Level1_Unsafe":                            "Model direct unsafe output (Level 1)",
-    "Physical Collapse":                        "Collapse in water - critical (Level 2)",
-    "Level2_Critical":                          "Model direct critical/drowning output (Level 2)"
-  },
-  "temporal_logic": {
-    "enabled": true,
-    "escalation_rule": "Level 1 continuous detection for 2 seconds automatically escalates to Level 2",
-    "duration_threshold": 2.0,
-    "grace_period_frames": 60,
-    "description": "Model has 28 classes consolidated to 3 alert levels. Level 2 triggers either directly (Level2_Critical / Physical Collapse detected by model) or via temporal escalation (Level 1 sustained 2s). All other classes map to Level 0 or Level 1."
+    "0": "Safe — swimming or floating. No action.",
+    "1": "Level 1 — drowning detected at >= 40% conf. Beep + 5s escalation timer.",
+    "2": "Level 2 — drowning sustained 5s. Alarm + Telegram + 20s response countdown."
   }
 }

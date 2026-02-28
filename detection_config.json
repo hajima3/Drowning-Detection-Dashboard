@@ -1,15 +1,36 @@
 {
-  "process_every_n_frames": 1,
-  "scale_factor": 1.0,
-  "jpeg_quality": 75,
-  "default_confidence": 0.20,
-  "level2_duration_threshold": 5.0,
-  "response_countdown": 20.0,
-  "grace_period_frames": 60,
-  "target_fps": 30,
-  "yolo_imgsz": 640,
-  "level1_min_conf": 0.0,
-  "level2_min_conf": 0.80,
-  "iou_threshold": 0.45,
-  "model_files": ["best.pt"]
+  "model": "best.pt",
+  "inference": {
+    "confidence": 0.25,
+    "iou": 0.45,
+    "imgsz": 640,
+    "half": true
+  },
+  "alert": {
+    "drowning_conf_min": 0.40,
+    "consec_min_frames": 6,
+    "min_dominance": 0.55,
+    "behav_window_s": 4.0,
+    "confirm_seconds": 2.0,
+    "escalation_time_s": 5.0,
+    "response_countdown_s": 20.0,
+    "grace_time_s": 3.0
+  },
+  "frame_buffer": {
+    "display_delay_s": 1.0,
+    "past_frames": 10,
+    "past_weight": 0.5,
+    "present_frames": 30,
+    "present_weight": 1.0,
+    "future_frames": 60,
+    "future_weight": 1.5,
+    "_comment": "At 30 FPS: Past=0.33s, Present=1.00s (display delay), Future=2.00s. Total=100 frames. Score = W @ M (weight vector x observation matrix)."
+  },
+  "stream": {
+    "target_fps": 30,
+    "infer_every": 2,
+    "jpeg_quality": 80,
+    "max_display_width": 1280,
+    "max_display_height": 720
+  }
 }

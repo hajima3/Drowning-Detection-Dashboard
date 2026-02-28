@@ -1,991 +1,872 @@
 """
-YOLOv11 Drowning Detection Dashboard
-Real-time pool safety monitoring with 3-level alert system
-
-28-class model consolidated to 3 output levels:
-  Level 0 - Swimming  (14 classes): safe, no action
-  Level 1 - Risky     (12 classes): monitor, audio beep, starts 5s escalation timer
-  Level 2 - Drowning  ( 2 classes): immediate emergency, alarm + Telegram
-    Fires via: (a) direct model detection (Level2_Critical / Physical Collapse, conf >= 80%)
-               (b) temporal escalation   (Level 1 OR downgraded Level 2 sustained >= 5s)
-                   Anti-false-positive: smoothing window requires 60% of last 15 frames
-                   (~9 frames) to vote Level 1 before the timer starts.
-
-10/20 Rule applied:
-  - Level 1 must be sustained 5s before escalating (identification window)
-  - 20-second response countdown shown on screen once Level 2 fires
+YOLOv11 Drowning Detection Dashboard — Live Testing Build
+  Level 0: swimming / floating  — safe, no action
+  Level 1: drowning detected    — orange box + beep + escalation timer starts
+  Level 2: sustained drowning   — red box + alarm + Telegram + response countdown
 """
 
 import logging
-import sys
+import datetime
+import contextlib
+import threading
+import json
 
-# ── Silence noisy third-party loggers before anything else imports them ──────
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
 
 from flask import Flask, render_template, Response, request, jsonify
 import flask.cli
-flask.cli.show_server_banner = lambda *args, **kwargs: None   # hide Flask startup banner
+flask.cli.show_server_banner = lambda *args, **kwargs: None
 
 from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 import cv2
 import time
 import os
-import json
-import re
-from pathlib import Path
+import math
 from collections import deque
+from pathlib import Path
 import requests
 from dotenv import load_dotenv
 import torch
+import numpy as np
 
-# Load environment variables from .env file
 load_dotenv()
+cv2.setNumThreads(8)   # i7-12700: 8 P-cores for video decode/resize
+
+# ======================== LOAD CONFIG FILES ========================
+_BASE = Path(__file__).parent
+
+with open(_BASE / 'detection_config.json', encoding='utf-8-sig') as _f:
+    _cfg = json.load(_f)
+_inf    = _cfg['inference']
+_alert  = _cfg['alert']
+_stream = _cfg['stream']
+
+with open(_BASE / 'class_mapping.json', encoding='utf-8-sig') as _f:
+    _cmap = json.load(_f)
+# Maps class name → alert_level. Used for both level assignment and NMS priority
+# (higher alert_level = higher priority: drowning > floating > swimming).
+_CLASS_LEVEL: dict[str, int] = {
+    v['name'].lower(): v['alert_level']
+    for v in _cmap['classes'].values()
+}
+
+with open(_BASE / 'model_metrics.json', encoding='utf-8-sig') as _f:
+    _metrics = json.load(_f)
+
+# ── Class vote weights from model metrics ────────────────────────────────────
+# drowning_weight = recall/precision ≈ 1.021  (compensates for recall > precision)
+# safe_weight     = 1 - FNR           ≈ 0.978
+_m_precision = _metrics['training']['precision']   # 0.958
+_m_recall    = _metrics['training']['recall']       # 0.978
+_m_fnr       = 1.0 - _m_recall
+
+_CLASS_VOTE_WEIGHT: dict[str, float] = {
+    cls: (_m_recall / _m_precision) if _CLASS_LEVEL.get(cls, 0) >= 1 else (1.0 - _m_fnr)
+    for cls in _CLASS_LEVEL
+}
+
+# Monotonic counter assigned to every new track — drift-proof ID matching.
+_next_track_id: int = 0
 
 # ======================== SETTINGS ========================
-# Central detection config (shared across machines, tracked in git)
-DETECTION_CONFIG_FILE = Path(__file__).parent / "detection_config.json"
+# detection_config.json is the source of truth; .env overrides for live tuning.
+INFERENCE_CONF      = float(os.getenv('DEFAULT_CONFIDENCE',        _inf['confidence']))
+YOLO_IOU            = float(os.getenv('IOU_THRESHOLD',             _inf['iou']))
+YOLO_IMGSZ          = int(os.getenv('YOLO_IMGSZ',                  _inf['imgsz']))
 
-def load_detection_config():
-    try:
-        with open(DETECTION_CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# Alert thresholds
+DROWNING_CONF_MIN   = float(os.getenv('LEVEL1_MIN_CONF',           _alert['drowning_conf_min']))    # conf floor to call a box L1 (0.40)
 
-_det_cfg = load_detection_config()
+# Temporal smoothing + consecutive-frame threshold
+CONSEC_MIN_FRAMES       = int(os.getenv('CONSEC_MIN_FRAMES',        6))    # consecutive present+future drowning frames to confirm (~0.4s)
+MIN_DOMINANCE           = float(os.getenv('MIN_DOMINANCE',          0.55)) # drowning must hold ≥55% of total W@M score to trigger alert
 
-def _cfg(name, default):
-    """Helper to read from env first, then detection_config.json, then default."""
-    env_val = os.getenv(name)
-    if env_val is not None:
-        return env_val
-    return str(_det_cfg.get(name.lower(), default))
+# Escalation state machine
+CONFIRM_SECONDS  = float(os.getenv('CONFIRM_SECONDS',             _alert.get('confirm_seconds', 2.0)))
+ESCALATION_TIME  = float(os.getenv('LEVEL_2_DURATION_THRESHOLD', _alert['escalation_time_s']))
+RESPONSE_COUNTDOWN = float(os.getenv('RESPONSE_COUNTDOWN',       _alert['response_countdown_s']))
+GRACE_TIME       = float(os.getenv('GRACE_TIME',                 _alert['grace_time_s']))
 
-# Inference runs on EVERY frame (1). Raise to 2-3 if CPU is too slow.
-PROCESS_EVERY_N_FRAMES = int(_cfg("PROCESS_EVERY_N_FRAMES", 1))
-# Keep full resolution for inference so small/fast people aren't missed.
-SCALE_FACTOR = float(_cfg("SCALE_FACTOR", 1.0))
-JPEG_QUALITY = int(_cfg("JPEG_QUALITY", 65))                    # JPEG compression quality
-# Lower confidence so borderline detections (0.20-0.5) still show up.
-# 0.20 maximises recall so the model catches more swimmers before applying alert logic.
-DEFAULT_CONFIDENCE = float(_cfg("DEFAULT_CONFIDENCE", 0.20))
-# 10/20 rule: Level 1 must be sustained for 5s before escalating to Level 2
-LEVEL_2_DURATION_THRESHOLD = float(_cfg("LEVEL_2_DURATION_THRESHOLD", 5.0))
-# 10/20 rule: lifeguard has 20s to reach the swimmer once Level 2 fires
-RESPONSE_COUNTDOWN = float(_cfg("RESPONSE_COUNTDOWN", 20.0))
-# Number of consecutive missed-detection frames before boxes clear and timers reset.
-# 60 frames = 2 seconds at 30 fps — keeps boxes on screen during brief model misses.
-GRACE_PERIOD_FRAMES = int(_cfg("GRACE_PERIOD_FRAMES", 60))
+# Box tracker
+TRACK_IOU_MIN  = float(os.getenv('TRACK_IOU_MIN',  0.45))   # min IoU to link detection to existing track
+DECAY_RATE     = float(os.getenv('DECAY_RATE',     0.80))   # time-decay: w = e^(-DECAY_RATE × age_s)
+MIN_L1_S       = float(os.getenv('MIN_L1_S',       0.50))   # min track age (s) before L1 is allowed
+GHOST_TIME_S   = float(os.getenv('GHOST_TIME_S',   0.80))   # drop track after this many seconds unseen
+POS_EMA_ALPHA  = float(os.getenv('POS_EMA_ALPHA',  0.70))   # EMA weight for new box position
 
-# Optional strict-mode thresholds (per-level minimum confidence)
-# Example for very low false positives:
-#   LEVEL1_MIN_CONF=0.7
-#   LEVEL2_MIN_CONF=0.9
-LEVEL1_MIN_CONF = float(_cfg("LEVEL1_MIN_CONF", 0.0))
-LEVEL2_MIN_CONF = float(_cfg("LEVEL2_MIN_CONF", 0.0))
+# Prediction buffer: Past=10 / Present=30 / Future=60 frames @ 30 FPS
+# Past    = 0.33 s oldest context        weight 0.50
+# Present = 1.00 s = display delay lag   weight 1.00
+# Future  = 2.00 s real-time lookahead   weight 1.50
+# Score = W @ M  (weight vector × observation matrix per track).
+FUTURE_FRAMES  = int(os.getenv('FUTURE_FRAMES',   60))
+PRESENT_FRAMES = int(os.getenv('PRESENT_FRAMES',  30))
+PAST_FRAMES    = int(os.getenv('PAST_FRAMES',     10))
+BEHAV_WINDOW_S = float(os.getenv('BEHAV_WINDOW_S', 4.00))   # must cover full 100-frame buffer
+FUTURE_WEIGHT  = float(os.getenv('FUTURE_WEIGHT',  1.50))
+PRESENT_WEIGHT = float(os.getenv('PRESENT_WEIGHT', 1.00))
+PAST_WEIGHT    = float(os.getenv('PAST_WEIGHT',    0.50))
 
-# NMS IoU threshold: lower = keep more overlapping boxes (fewer missed people)
-YOLO_IOU = float(_cfg("IOU_THRESHOLD", 0.4))
+# Stream / display
+DISPLAY_DELAY_S = float(os.getenv('DISPLAY_DELAY_S', 1.00))  # display lag = 1 s = 30 frames
 
-# Performance / hardware overrides
-TARGET_FPS = float(_cfg("TARGET_FPS", 30))
-YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")  # auto | cpu | cuda:0 | 0
-# 640 matches what the model was trained at. Lower (320) is faster but less accurate.
-YOLO_IMGSZ = int(_cfg("YOLO_IMGSZ", 640))
-YOLO_HALF = os.getenv("YOLO_HALF", "auto")  # auto | true | false
+TARGET_FPS          = min(float(os.getenv('TARGET_FPS', _stream['target_fps'])), 30.0)  # hard cap at 30 FPS
+INFER_EVERY         = int(os.getenv('INFER_EVERY',                 _stream['infer_every']))
+JPEG_QUALITY        = int(os.getenv('JPEG_QUALITY',                _stream['jpeg_quality']))
+DISP_MAX_W          = int(_stream['max_display_width'])
+DISP_MAX_H          = int(_stream['max_display_height'])
 
 # ======================== FLASK APP ========================
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = str(Path(__file__).parent / 'uploads')
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
 
-# Create required folders
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs('static/audio', exist_ok=True)
+os.makedirs(str(_BASE / 'static' / 'audio'), exist_ok=True)
 
-# Load model metrics
-METRICS_FILE = Path(__file__).parent / "model_metrics.json"
-CLASS_MAPPING_FILE = Path(__file__).parent / "class_mapping.json"
+# ======================== TELEGRAM ========================
+def send_telegram_alert():
+    """Fire-and-forget — spawns a background thread so the stream is never blocked."""
+    threading.Thread(target=_do_send_telegram, daemon=True).start()
 
-def load_model_metrics():
-    """Load deployed model info"""
-    try:
-        with open(METRICS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {"current_model": "best.pt", "classes": ["Level 0", "Level 1", "Level 2"]}
-
-def load_class_mapping():
-    """Load class to alert level mapping"""
-    try:
-        with open(CLASS_MAPPING_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return None
-
-# Load class mapping
-class_mapping = load_class_mapping()
-
-
-def send_telegram_alert(detection_event):
-    """Send a Telegram message for Level 2 (critical) alerts, if configured.
-
-    Configuration is taken from environment variables:
-    - TELEGRAM_BOT_TOKEN
-    - TELEGRAM_CHAT_ID
-    """
-
+def _do_send_telegram():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
+    chat_id   = os.getenv("TELEGRAM_CHAT_ID")
     if not bot_token or not chat_id:
-        print("[TELEGRAM] Skipping send: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set.")
+        print("[TELEGRAM] Credentials not set - skipping.")
         return
-
-    # Build message text from detection event
-    level = detection_event.get("level", 2)
-    confidence = detection_event.get("confidence", 0)
-    detected_class = detection_event.get("class", "Unknown")
-    duration = detection_event.get("duration", 0)
-
-    import datetime
     time_str = datetime.datetime.now().strftime("%H:%M:%S")
-
     text = (
         "EMERGENCY ALERT\n"
-        "Drowning incident detected at Silliman University Pool.\n"
-        "Immediate ambulance dispatch required.\n"
+        "Drowning incident detected at Silliman Pool!\n"
         f"Time: {time_str}\n"
         "Location: https://maps.app.goo.gl/1aHKjNd1N1tLyuPM6"
     )
-
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-
     try:
-        resp = requests.post(url, json=payload, timeout=5)
-        if resp.status_code == 200:
-            print(f"[TELEGRAM] Sent Level {level} alert message.")
-        else:
-            print(f"[TELEGRAM] Failed to send alert. Status: {resp.status_code}, Response: {resp.text}")
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=5,
+        )
+        print(f"[TELEGRAM] {'Sent' if resp.status_code == 200 else 'Failed'}: {resp.status_code}")
     except Exception as e:
-        print(f"[TELEGRAM] Error sending alert: {e}")
+        print(f"[TELEGRAM] Error: {e}")
 
-def get_alert_level_for_class(class_name):
-    """Map a detected class name to an alert level.
-
-    28-CLASS MODEL — 3 OUTPUT LEVELS:
-      Level 0 = Swimming  (safe, no action)            - 14 classes
-      Level 1 = Risky     (monitor, ready to intervene) - 12 classes
-      Level 2 = Drowning  (immediate emergency)         - 2 classes (direct model output)
-
-    Level 2 fires in two ways:
-      a) DIRECT: model detects Level2_Critical or Physical Collapse → instant alert
-      b) TEMPORAL: Level 1 sustained for 2 seconds continuously → escalated alert
-
-    Priority order:
-      1. Level 2 direct classes (highest — never downgraded)
-      2. Level 1 risky classes
-      3. Level 0 safe classes
-      4. class_mapping.json lookup (fallback)
-      5. Default to Level 0 if unknown
+# ======================== CLASS -> LEVEL ========================
+def class_to_level(class_name: str, conf: float) -> int:
     """
+    Map a detection to an alert level using class_mapping.json.
+    Drowning at conf >= DROWNING_CONF_MIN → Level 1.
+    Everything else (swimming, floating, low-conf drowning) → Level 0 safe.
+    """
+    base_level = _CLASS_LEVEL.get(class_name.strip().lower(), 0)
+    if base_level == 1 and conf < DROWNING_CONF_MIN:
+        return 0   # confident gate: below threshold falls back to L0
+    return base_level
 
-    def normalize_label(label: str) -> str:
-        if not label:
-            return ""
-        normalized = re.sub(r"[^a-z0-9]+", "_", str(label).strip().lower())
-        normalized = re.sub(r"_+", "_", normalized).strip("_")
-        return normalized
-
-    name_key = normalize_label(class_name)
-
-    # ---- Level 2: Drowning / Critical (DIRECT MODEL OUTPUT — highest priority) ----
-    if name_key in {
-        "level2_critical", "physical_collapse",
-        "drowning", "critical",           # generic fallback variants
-        "lvl_2", "lvl2", "level_2",
-    }:
-        return 2, "Drowning"
-
-    # ---- Level 1: Risky (MODEL OUTPUT) ----
-    if name_key in {
-        "risky", "level1_unsafe", "unsafe", "warning",
-        "descending_depth", "distress_signs",
-        "erratic_unstable_pool_movement", "erratic_splashing",
-        "improper_advanced_coordinated_swimming",
-        "improper_horizontal_stroke", "improper_movement",
-        "improper_swim_wear", "improper_vertical_swimming",
-        "only_limbs_visible", "unsafe_diving_and_pool_entry",
-        "lvl_1", "lvl1", "level_1",
-    }:
-        return 1, "Risky"
-
-    # ---- Level 0: Swimming (MODEL OUTPUT) ----
-    if name_key in {
-        "swimming", "swimmer", "normal_swimming", "level0_safe", "safe",
-        "back_float", "backstroke", "breaststroke", "butterfly", "dog_paddle",
-        "freestyle", "side_stroke", "treading_water", "underwater_swimming",
-        "vertical_rest", "entering_pool_behavior",
-        "movements_allowed_outside_pool", "proper_swim_wear",
-        "lvl_0", "lvl0", "level_0",
-    }:
-        return 0, "Swimming"
-
-    # ---- Fallback: check class_mapping.json ----
-    if class_mapping:
-        for level_key, level_data in class_mapping['alert_levels'].items():
-            level_classes = level_data.get('classes', [])
-            normalized_classes = {normalize_label(c) for c in level_classes}
-            if name_key in normalized_classes:
-                level_num = int(level_key.split('_')[1])
-                return level_num, level_data.get('name', 'Alert')
-
-    # Unknown class — default to Swimming (Level 0)
-    return 0, "Swimming"
-
-
+# ======================== BOX HELPERS ========================
 def _iou(a, b):
-    """Compute IoU between two boxes [x1,y1,x2,y2] (display coords)."""
-    ix1 = max(a[0], b[0]); iy1 = max(a[1], b[1])
-    ix2 = min(a[2], b[2]); iy2 = min(a[3], b[3])
+    ix1 = max(a[0], b[0]);  iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2]);  iy2 = min(a[3], b[3])
     inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
     if inter == 0:
         return 0.0
     area_a = (a[2] - a[0]) * (a[3] - a[1])
     area_b = (b[2] - b[0]) * (b[3] - b[1])
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
+    return inter / (area_a + area_b - inter)
 
+def _update_tracks(tracks: list, detections: list, now: float = 0.0) -> list:
+    """
+    Time-based behavioral tracker with exponential time-decay scoring.
 
-def cross_class_nms(raw_boxes, iou_threshold=0.45):
+    Each track keeps BEHAV_WINDOW_S (4s) of (timestamp, cls, conf) history.
+    Class resolved via: weight = e^(-DECAY_RATE × age_s) × vote_weight × conf.
+    Min-time gate: track must exist MIN_L1_S before L1 is allowed.
+
+    Note: this tracker drives position smoothing and adaptive inference rate.
+    The authoritative display label comes from _pred_buf_resolve (raw YOLO history).
     """
-    Filter overlapping boxes across different classes.
-    Keeps the box with the highest alert_level; ties broken by confidence.
-    raw_boxes: list of dicts with keys x1,y1,x2,y2,conf,alert_level,class_name
+    used = set()
+
+    for t in tracks:
+        best_iou, best_i = 0.0, -1
+        tb = (t['x1'], t['y1'], t['x2'], t['y2'])
+        for i, d in enumerate(detections):
+            if i in used:
+                continue
+            iou = _iou(tb, (d['x1'], d['y1'], d['x2'], d['y2']))
+            if iou > best_iou:
+                best_iou, best_i = iou, i
+
+        if best_iou >= TRACK_IOU_MIN:
+            d = detections[best_i]
+            used.add(best_i)
+            t['last_seen'] = now
+
+            # Smooth box position
+            a = POS_EMA_ALPHA
+            t['x1'] = int(a * d['x1'] + (1 - a) * t['x1'])
+            t['y1'] = int(a * d['y1'] + (1 - a) * t['y1'])
+            t['x2'] = int(a * d['x2'] + (1 - a) * t['x2'])
+            t['y2'] = int(a * d['y2'] + (1 - a) * t['y2'])
+
+            # Append timestamped behavioural observation
+            t['history'].append((now, d['cls'], d['conf']))
+
+        # Prune observations older than BEHAV_WINDOW_S
+        cutoff = now - BEHAV_WINDOW_S
+        t['history'] = [(ts, c, cf) for (ts, c, cf) in t['history'] if ts >= cutoff]
+
+        if not t['history']:
+            # No evidence at all — reset to safe
+            t['cls'] = list(_CLASS_LEVEL.keys())[0]
+            t['conf'] = 0.0
+            t['alert_level'] = 0
+            continue
+
+        # Time-decay scoring: w = e^(-DECAY_RATE × age) × vote_weight × conf
+        cls_scores:  dict = {}
+        cls_weights: dict = {}
+        for (ts, cls, conf) in t['history']:
+            age = max(0.0, now - ts)
+            w   = math.exp(-DECAY_RATE * age) * _CLASS_VOTE_WEIGHT.get(cls, 1.0) * conf
+            cls_scores[cls]  = cls_scores.get(cls,  0.0) + conf * w
+            cls_weights[cls] = cls_weights.get(cls, 0.0) + w
+
+        resolved_cls  = max(cls_scores, key=cls_scores.__getitem__)
+        resolved_conf = cls_scores[resolved_cls] / cls_weights[resolved_cls]
+
+        t['cls']         = resolved_cls
+        t['conf']        = resolved_conf
+        t['alert_level'] = class_to_level(resolved_cls, resolved_conf)
+
+        # --- Min-time gate ---
+        # Track must have behavioural observations spanning at least MIN_L1_S seconds.
+        # A person appearing for 0.1s cannot trigger L1 regardless of confidence.
+        time_span = t['history'][-1][0] - t['history'][0][0] if len(t['history']) > 1 else 0.0
+        if time_span < MIN_L1_S:
+            t['alert_level'] = 0
+
+    # Promote unmatched detections to new tracks
+    global _next_track_id
+    for i, d in enumerate(detections):
+        if i not in used:
+            tracks.append({
+                'id':          _next_track_id,
+                'x1': d['x1'], 'y1': d['y1'], 'x2': d['x2'], 'y2': d['y2'],
+                'conf': d['conf'],
+                'alert_level': 0,        # always start at L0
+                'cls': d['cls'],
+                'history': [(now, d['cls'], d['conf'])],
+                'last_seen': now,
+            })
+            _next_track_id += 1
+
+    # Drop tracks not seen within GHOST_TIME_S seconds
+    return [t for t in tracks if (now - t.get('last_seen', now)) <= GHOST_TIME_S]
+
+def _merge_tracks(tracks: list) -> list:
+    """Merge overlapping tracks (IoU >= 0.50). Keep higher alert_level, combine histories."""
+    merged = []
+    skip   = set()
+    for i, a in enumerate(tracks):
+        if i in skip:
+            continue
+        ba = (a['x1'], a['y1'], a['x2'], a['y2'])
+        for j, b in enumerate(tracks):
+            if j <= i or j in skip:
+                continue
+            bb = (b['x1'], b['y1'], b['x2'], b['y2'])
+            if _iou(ba, bb) >= 0.50:
+                # Keep the dominant track; absorb the other's timestamped history
+                dominant = a if (a['alert_level'], a['conf']) >= (b['alert_level'], b['conf']) else b
+                absorb   = b if dominant is a else a
+                dominant['history'].extend(absorb['history'])
+                # Keep history sorted chronologically after merge
+                dominant['history'].sort(key=lambda e: e[0])
+                # Dominant track keeps its own ID; absorb's ID is discarded.
+                skip.add(j if dominant is a else i)
+        merged.append(a)
+    return [t for i, t in enumerate(tracks) if i not in skip]
+
+def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) -> list:
     """
-    # Sort: highest alert level first, then highest conf
-    sorted_boxes = sorted(raw_boxes, key=lambda d: (d['alert_level'], d['conf']), reverse=True)
+    Matrix-scored class resolution with temporal smoothing.
+
+    Per track, builds observation matrix  M[frame, class]  of raw confidences.
+    Temporal weight vector  W[frame]  = Past(0.5) / Present(1.0) / Future(1.5).
+    Class scores = W @ M  (matrix dot product per track).
+
+    Drowning triggers L1 only when ALL gates pass:
+      A) Wins argmax  (highest weighted score)
+      B) Dominance ≥ MIN_DOMINANCE  (holds ≥55% of total score — anti-flicker)
+      C) ≥ CONSEC_MIN_FRAMES consecutive present+future drowning frames
+    Tie-break: score → mean_conf → future_count → retain previous class.
+    """
+    if not snap_data or not pred_buffer:
+        return []
+    if last_resolved is None:
+        last_resolved = {}
+
+    sorted_preds = sorted(pred_buffer, key=lambda e: e[0])
+    n = len(sorted_preds)
+
+    past_count    = min(PAST_FRAMES, n)
+    present_count = min(PRESENT_FRAMES, max(0, n - past_count))
+
+    # Consistent class ordering for matrix columns
+    _cls_names = sorted(_CLASS_LEVEL.keys())
+    _cls_idx   = {c: i for i, c in enumerate(_cls_names)}
+    n_cls      = len(_cls_names)
+
+    # Build frame weight vector  W[frame]
+    W = np.empty(n, dtype=np.float32)
+    _is_future = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if i < past_count:
+            W[i] = PAST_WEIGHT
+        elif i < past_count + present_count:
+            W[i] = PRESENT_WEIGHT
+        else:
+            W[i] = FUTURE_WEIGHT
+            _is_future[i] = True
+
+    # Pre-compute max consecutive drowning run per track (present+future only)
+    _consec: dict = {}
+    _run:    dict = {}
+    for i in range(past_count, n):
+        _, preds = sorted_preds[i]
+        seen_drown = {t for (t, c, _) in preds if _CLASS_LEVEL.get(c, 0) >= 1}
+        for t in set(_run.keys()) | seen_drown:
+            if t in seen_drown:
+                _run[t] = _run.get(t, 0) + 1
+                if _run[t] > _consec.get(t, 0):
+                    _consec[t] = _run[t]
+            else:
+                _run[t] = 0
+
+    # Collect all detections per track in a single pass
+    snap_tids = {tid for (tid, *_) in snap_data}
+    track_obs: dict = {}   # tid → [(frame_idx, cls_idx, conf), ...]
+    for f_idx, (_, preds) in enumerate(sorted_preds):
+        for (tid, cls, conf) in preds:
+            if tid in snap_tids and cls in _cls_idx:
+                track_obs.setdefault(tid, []).append((f_idx, _cls_idx[cls], conf))
+
+    # Resolve displayed class per snapshot track
+    result = []
+    for (tid, sx1, sy1, sx2, sy2) in snap_data:
+        obs = track_obs.get(tid)
+        if not obs:
+            continue
+
+        # Build observation matrix  M[frame, class]  for this track
+        M = np.zeros((n, n_cls), dtype=np.float32)
+        raw_confs:  dict = {}   # cls_name → [conf, ...] for mean tie-break
+        fut_counts: dict = {}   # cls_name → count in future region
+
+        for (f_idx, ci, conf) in obs:
+            M[f_idx, ci] = conf
+            cn = _cls_names[ci]
+            raw_confs.setdefault(cn, []).append(conf)
+            if _is_future[f_idx]:
+                fut_counts[cn] = fut_counts.get(cn, 0) + 1
+
+        # Matrix calculation:  scores = W @ M → (n_cls,)
+        scores = W @ M
+        total  = float(scores.sum())
+        if total < 1e-6:
+            continue
+
+        # argmax with tie-breaking
+        resolved_cls = max(_cls_names, key=lambda c: (
+            float(scores[_cls_idx[c]]),                                       # weighted score
+            (sum(raw_confs[c]) / len(raw_confs[c])) if raw_confs.get(c)       # mean raw conf
+                else 0.0,
+            fut_counts.get(c, 0),                                            # future evidence
+            1 if last_resolved.get(tid) == c else 0,                         # stickiness
+        ))
+
+        r_confs = raw_confs.get(resolved_cls, [])
+        resolved_conf = (sum(r_confs) / len(r_confs)) if r_confs else 0.01
+        resolved_conf = max(0.01, min(resolved_conf, 1.0))
+
+        alert_level = class_to_level(resolved_cls, resolved_conf)
+
+        # Gate A: dominance — drowning must hold ≥ MIN_DOMINANCE of total score
+        dominance = float(scores[_cls_idx[resolved_cls]]) / total
+        if alert_level >= 1 and dominance < MIN_DOMINANCE:
+            alert_level = 0
+
+        # Gate B: consecutive-frame confirmation
+        if alert_level >= 1 and _consec.get(tid, 0) < CONSEC_MIN_FRAMES:
+            alert_level = 0
+
+        last_resolved[tid] = resolved_cls
+        result.append({
+            'x1': sx1, 'y1': sy1, 'x2': sx2, 'y2': sy2,
+            'alert_level': alert_level, 'conf': resolved_conf,
+        })
+
+    return result
+
+def cross_class_nms(boxes, iou_threshold=0.50):
+    """Suppress overlapping boxes across classes. Higher alert_level wins."""
+    boxes = sorted(
+        boxes,
+        key=lambda d: (d['alert_level'], _CLASS_LEVEL.get(d['cls'].lower(), 0), d['conf']),
+        reverse=True,
+    )
     kept = []
-    for candidate in sorted_boxes:
-        box_c = (candidate['x1'], candidate['y1'], candidate['x2'], candidate['y2'])
-        suppressed = False
-        for accepted in kept:
-            box_a = (accepted['x1'], accepted['y1'], accepted['x2'], accepted['y2'])
-            if _iou(box_c, box_a) >= iou_threshold:
-                suppressed = True
-                break
-        if not suppressed:
+    for candidate in boxes:
+        bc = (candidate['x1'], candidate['y1'], candidate['x2'], candidate['y2'])
+        if not any(_iou(bc, (k['x1'], k['y1'], k['x2'], k['y2'])) >= iou_threshold for k in kept):
             kept.append(candidate)
     return kept
 
+def draw_boxes(frame, boxes, frame_alert_level=0, incident_box=None):
+    """Draw detection boxes. During L2, only the incident person shows red."""
+    for d in boxes:
+        lvl = d['alert_level']
 
-def _smoothed_alert_level(level_window, conf_window):
-    """
-    Confidence-weighted vote across the last N frames.
-
-    Asymmetric thresholds (safety-first):
-      Level 2 fires if it holds >= 35% of weighted votes  (~5-6 / 15 frames)
-      Level 1 fires if it holds >= 60% of weighted votes  (~9 / 15 frames)
-      Otherwise Level 0.
-
-    Rationale (tuned to best.pt's 87.7% recall, 82% precision, 28 classes):
-      - Level 1 at 60%: any detected Level 1 OR Level 2 class starts the
-        escalation timer, so the threshold is raised to 60% (9/15 frames)
-        to guard against brief/noisy detections. A genuine sustained risky
-        event will easily hold 60%; a glancing false-positive will not.
-      - Level 2 at 35%: kept lower because the 80% confidence gate and
-        level2_triggered flag already control false Level 2 alerts.
-      - A single noisy frame (1/15 = 6.7%) still cannot flip either state.
-    """
-    if not level_window:
-        return 0
-
-    level_weights = {0: 0.0, 1: 0.0, 2: 0.0}
-    total_weight = 0.0
-    for level, conf in zip(level_window, conf_window):
-        # Floor weight at 0.10 so zero-conf (no-detection) frames still count
-        w = max(float(conf), 0.10)
-        level_weights[level] = level_weights.get(level, 0.0) + w
-        total_weight += w
-
-    if total_weight == 0:
-        return 0
-
-    l2_frac = level_weights.get(2, 0.0) / total_weight
-    l1_frac = level_weights.get(1, 0.0) / total_weight
-
-    # Level 2 needs 35% weighted votes  (~5-6 / 15 frames)
-    # Level 1 needs 60% weighted votes  (~9 / 15 frames) — raised to reduce false positives
-    if l2_frac >= 0.35:
-        return 2
-    if l1_frac >= 0.60:
-        return 1
-    return 0
-
-# ======================== BOX DRAWING HELPER ========================
-# Human-readable display names per alert level shown in bounding box labels
-_LEVEL_DISPLAY = {0: 'Safe', 1: 'Risky', 2: 'Drowning'}
-
-def _draw_detection_boxes(frame, boxes):
-    """Draw bounding boxes + labels onto frame in-place. Works for any list of
-    box dicts produced by cross_class_nms (keys: x1,y1,x2,y2,conf,alert_level,class_name).
-
-    Label format:  [L1] Risky  0.57
-    The level display name (Safe / Risky / Drowning) is always derived from
-    alert_level so a downgraded detection never shows a misleading class name.
-    """
-    for det in boxes:
-        x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
-        conf        = det['conf']
-        alert_level = det['alert_level']
-
-        # Color and level tag per effective alert level (BGR)
-        if alert_level == 2:
-            box_color = (0, 0, 220)      # Bright Red   — Level 2 emergency
-            level_tag = '[L2]'
-        elif alert_level == 1:
-            box_color = (0, 140, 255)    # Orange       — Level 1 risky
-            level_tag = '[L1]'
+        # Determine display level for this box
+        if frame_alert_level == 2 and incident_box is not None:
+            is_incident = _iou(
+                (d['x1'], d['y1'], d['x2'], d['y2']), incident_box
+            ) >= 0.15
+            display_lvl = 2 if is_incident else lvl
         else:
-            box_color = (220, 180, 0)    # Blue         — Level 0 safe
-            level_tag = '[L0]'
+            display_lvl = lvl
 
-        # Bounding box (thicker border for Level 2)
-        thickness = 4 if alert_level == 2 else 3
-        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, thickness)
+        # L1 below DROWNING_CONF_MIN is shown as L0 (not yet confirmed drowning).
+        # Once a visual alert is active (frame_alert_level >= 1), always show L1/L2
+        # even if conf momentarily dips below the gate.
+        if display_lvl == 1 and d['conf'] < DROWNING_CONF_MIN and frame_alert_level == 0:
+            display_lvl = 0
 
-        # Label uses the level display name — never the raw model class name —
-        # so a downgraded Level2_Critical (conf<80%) reads "[L1] Risky  0.57"
-        level_name = _LEVEL_DISPLAY.get(alert_level, 'Unknown')
-        label = f'{level_tag} {level_name}  {conf:.2f}'
+        if display_lvl == 2:
+            color = (0, 0, 220)          # red — L2 EMERGENCY
+            label = f"[L2] Drowning {d['conf']:.2f}"
+        elif display_lvl == 1:
+            color = (0, 140, 255)        # orange — L1 Risky (>= 80% conf)
+            label = f"[L1] Risky {d['conf']:.2f}"
+        else:
+            color = (255, 130, 0)        # blue — L0 Safe (swimming, floating, or low-conf drowning)
+            label = f"[L0] Safe {d['conf']:.2f}"
+
+        x1, y1, x2, y2 = d['x1'], d['y1'], d['x2'], d['y2']
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
         (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-        cv2.rectangle(frame, (x1, y1 - th - bl - 8), (x1 + tw + 6, y1), box_color, -1)
+        cv2.rectangle(frame, (x1, y1 - th - bl - 8), (x1 + tw + 6, y1), color, -1)
         cv2.putText(frame, label, (x1 + 3, y1 - bl - 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
+def draw_banner(frame, alert_level, conf_pct, drowning_duration, level2_trigger_time):
+    """Draw the top-left status banner. No banner at Level 0."""
+    if alert_level == 2:
+        bg     = (0, 0, 160);    accent = (0, 0, 220)
+        icon   = '!! DROWNING EMERGENCY  |  10/20 STANDARD'
+        remaining = max(0.0, RESPONSE_COUNTDOWN - (time.time() - (level2_trigger_time or time.time())))
+        detail = (
+            f'Sustained {drowning_duration:.0f}s  |  '
+            f'20-SEC RESPONSE WINDOW  |  '
+            f'REACH VICTIM IN {remaining:.0f}s'
+        )
+    elif alert_level == 1:
+        bg     = (0, 130, 235);  accent = (0, 170, 255)
+        icon   = f'DROWNING DETECTED  |  {ESCALATION_TIME:.0f}-SEC CONFIRMATION WINDOW'
+        detail = (
+            f'{conf_pct:.0f}% confidence  |  '
+            f'escalating in {max(0.0, ESCALATION_TIME - drowning_duration):.1f}s'
+        )
+    else:
+        return
 
-# ======================== DEVICE SETUP ========================
-if YOLO_DEVICE.lower() == "auto":
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (iw, ih), _ = cv2.getTextSize(icon,   font, 0.85, 2)
+    (dw, dh), _ = cv2.getTextSize(detail, font, 0.55, 1)
+    px, py = 14, 8
+    bw = max(iw, dw) + px * 2
+    bh = ih + dh + py * 3
+    bx, by = 12, 12
+    cv2.rectangle(frame, (bx + 3, by + 3), (bx + bw + 3, by + bh + 3), (0, 0, 0), -1)  # shadow
+    cv2.rectangle(frame, (bx, by),         (bx + bw, by + bh),           bg,        -1)  # background
+    cv2.rectangle(frame, (bx, by),         (bx + 5,  by + bh),           accent,    -1)  # accent bar
+    cv2.putText(frame, icon,   (bx + px, by + py + ih),           font, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, detail, (bx + px, by + py * 2 + ih + dh),  font, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+
+# ======================== DEVICE + MODEL ========================
+_dev = os.getenv("YOLO_DEVICE", "auto")
+if _dev.lower() == "auto":
     yolo_device = 0 if torch.cuda.is_available() else "cpu"
 else:
-    try:
-        yolo_device = int(YOLO_DEVICE)
-    except ValueError:
-        yolo_device = YOLO_DEVICE
+    try:    yolo_device = int(_dev)
+    except: yolo_device = _dev
 
-use_half = False
-if str(YOLO_HALF).lower() in {"true", "1", "yes"}:
-    use_half = True
-elif str(YOLO_HALF).lower() == "auto":
-    use_half = bool(torch.cuda.is_available())
+model = YOLO(str(Path(__file__).parent / "best.pt"), verbose=False)
+with open(os.devnull, 'w') as _dn, contextlib.redirect_stdout(_dn):
+    try: model.fuse()
+    except: pass
 
-# ======================== MODEL LOADING ========================
-def _load_model():
-    root = Path(__file__).parent
-    env_path = os.getenv("MODEL_PATH")
-    if env_path:
-        model_path = str(Path(env_path))
-    else:
-        configured = _det_cfg.get("model_files", ["best.pt"])
-        names = configured if isinstance(configured, list) else [configured]
-        model_path = str(root / "best.pt")
-        for name in names:
-            candidate = root / name
-            if candidate.exists():
-                model_path = str(candidate)
-                break
-    # Load model silently — suppress YOLO's own verbose output
-    m = YOLO(model_path, verbose=False)
-    try:
-        _devnull = open(os.devnull, 'w')
-        _old_stdout, sys.stdout = sys.stdout, _devnull
-        m.fuse()
-        sys.stdout = _old_stdout
-        _devnull.close()
-    except Exception:
-        sys.stdout = _old_stdout if '_old_stdout' in dir() else sys.stdout
-    return m
+# _use_half: respect detection_config.json 'half' setting AND require GPU
+_use_half = _inf.get('half', True) and yolo_device != 'cpu'
+torch.backends.cudnn.benchmark = True   # RTX 3060: cuDNN auto-tunes kernels for fixed 640 input
+_dummy = np.zeros((YOLO_IMGSZ, YOLO_IMGSZ, 3), dtype=np.uint8)
+for _ in range(3):   # 3 warmup frames to fully settle cuDNN kernel selection
+    model.predict(_dummy, conf=INFERENCE_CONF, imgsz=YOLO_IMGSZ, iou=YOLO_IOU,
+                  device=yolo_device, half=_use_half, verbose=False)
+del _dummy
 
-model = _load_model()
-
-
-current_source = None
+# ======================== GLOBAL STATE ========================
+current_source   = None
 detection_active = False
-confidence_threshold = DEFAULT_CONFIDENCE
-current_fps = 0.0  # Updated by generate_frames, read by /get_stats
+current_fps      = 0.0
 
-# Detection tracking
-latest_detections = []
-detection_history = []
+latest_detections = []   # consumed by /get_detections
+detection_history = []   # last 50 events (debounced)
 
-# Drowning duration tracking
-drowning_start_time = None
-continuous_drowning_frames = 0
-drowning_miss_frames = 0   # grace-period counter for timer hysteresis
-level2_triggered = False   # Flag to ensure only ONE Level 2 log & SMS per incident
-level2_trigger_time = None # Timestamp when Level 2 first fired (for 20s response countdown)
+# --- Escalation state ---
+# Two-phase confirmation:
+#   confirm_start_time  : wall-clock time when continuous L1 detection began (None = no L1)
+#   drowning_start_time : wall-clock time when escalation timer STARTED (None = not confirmed)
+#   last_drowning_time  : wall-clock time of the most recent L1 displayed frame
+#   level2_triggered    : True once L2 alarm has fired (prevents repeat Telegram)
+#   level2_trigger_time : when L2 was first triggered (for countdown)
+#   incident_box        : (x1,y1,x2,y2) of the drowning person who triggered escalation
+confirm_start_time   = None
+drowning_start_time  = None
+last_drowning_time   = None
+level2_triggered     = False
+level2_trigger_time  = None
+incident_box         = None
 
-# ======================== VIDEO PROCESSING ========================
+def _reset_state():
+    """Clear all escalation state — called on stream start/stop."""
+    global confirm_start_time, drowning_start_time, last_drowning_time
+    global level2_triggered, level2_trigger_time, incident_box
+    confirm_start_time   = None
+    drowning_start_time  = None
+    last_drowning_time   = None
+    level2_triggered     = False
+    level2_trigger_time  = None
+    incident_box         = None
+
+# ======================== DETECTION LOG ========================
+def _log_event(level, audio, conf_pct):
+    """Append detection event; debounce Level 1 to once per 2s."""
+    now = time.time()
+    if level == 1 and detection_history:
+        last = detection_history[-1]
+        if last['level'] == 1 and (now - last['timestamp']) < 2.0:
+            return
+    event = {
+        'type':       'Level 2 - EMERGENCY' if level == 2 else 'Level 1 - Drowning Detected',
+        'level':      level,
+        'audio':      audio,
+        'confidence': round(conf_pct, 2),
+        'timestamp':  now,
+    }
+    detection_history.append(event)
+    latest_detections.append(event)
+    if len(detection_history) > 50:
+        detection_history.pop(0)
+
+# ======================== VIDEO STREAM ========================
 def generate_frames(source):
-    """Generate frames with YOLOv11 detection"""
-    global detection_active, drowning_start_time, continuous_drowning_frames, drowning_miss_frames, current_fps, level2_triggered, level2_trigger_time
-    
-    # Initialize video capture
+    global detection_active
+    global current_fps
+    global confirm_start_time, drowning_start_time, last_drowning_time
+    global level2_triggered, level2_trigger_time, incident_box
+
+    # ---- Capture setup ----
     if source == 0:
-        cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)  # DirectShow for webcam
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # MJPG: faster USB bandwidth than YUY2
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  DISP_MAX_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DISP_MAX_H)
+        cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
     else:
         cap = cv2.VideoCapture(source)
-    
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce lag
-    
-    # Get video dimensions
-    original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    process_width = int(original_width * SCALE_FACTOR)
-    process_height = int(original_height * SCALE_FACTOR)
-    
-    max_display_width = 960
-    max_display_height = 540
-    
-    if original_width > max_display_width or original_height > max_display_height:
-        display_scale = min(max_display_width / original_width, max_display_height / original_height)
-        display_width = int(original_width * display_scale)
-        display_height = int(original_height * display_scale)
-    else:
-        display_width = original_width
-        display_height = original_height
-    
-    print(f"📹 Stream started ({display_width}x{display_height})")
-    
-    frame_count = 0
-    fps_time = time.time()
-    last_annotated_frame = None
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Scale display to max 1280x720 (RTX 3060 streams this cleanly)
+    scale  = min(DISP_MAX_W / orig_w, DISP_MAX_H / orig_h, 1.0)
+    disp_w = int(orig_w * scale)
+    disp_h = int(orig_h * scale)
+
+    print(f"Stream started ({disp_w}x{disp_h})")
+
+    frame_count     = 0
+    fps_time        = time.time()
     last_frame_time = time.time()
-    target_fps = TARGET_FPS
-    infer_imgsz = YOLO_IMGSZ
 
-    # Persist last known boxes so they are redrawn on every frame (including
-    # skipped inference frames) — keeps boxes visible whenever a person is present.
-    last_known_boxes = []
+    last_filtered   = []    # cached YOLO result for skipped frames
+    last_raw_lvl    = 0     # raw YOLO alert level (drives adaptive inference rate)
+    report_conf_ema = 0.0   # EMA-smoothed conf for banner/API
+    tracks          = []    # box tracker
 
-    # Temporal smoothing — rolling window of the last 15 processed frames
-    SMOOTH_WINDOW = 15
-    level_vote_window = deque(maxlen=SMOOTH_WINDOW)  # alert level per frame
-    conf_vote_window  = deque(maxlen=SMOOTH_WINDOW)  # max confidence per frame
-    drowning_miss_frames = 0  # reset per stream session
-    
+    raw_frame_buffer: deque = deque()     # (timestamp, pixel_frame, snap_data)
+    pred_buffer: deque = deque(maxlen=PAST_FRAMES + PRESENT_FRAMES + FUTURE_FRAMES)
+    last_resolved_cls = {}  # tid → last displayed class (stickiness tie-breaker)
+
     while detection_active:
-        success, frame = cap.read()
-        if not success:
-            if source != 0:  # Loop video
+        ok, frame = cap.read()
+        if not ok:
+            if source != 0:     # loop video file
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
-            else:
-                break
-        
-        # Drop buffered frames for webcam
-        if source == 0:
-            for _ in range(2):
-                cap.grab()
-        
+            break
+
         frame_count += 1
-        
-        # Frame rate limiting
-        current_time = time.time()
-        elapsed = current_time - last_frame_time
-        if elapsed < (1.0 / target_fps):
-            time.sleep((1.0 / target_fps) - elapsed)
-        last_frame_time = time.time()
-        
-        # On skipped inference frames: build a fresh display frame and overlay
-        # the last known boxes — this keeps boxes visible and correctly positioned
-        # on the current video frame rather than showing a stale frozen frame.
-        if frame_count % PROCESS_EVERY_N_FRAMES != 0:
-            if display_width != original_width or display_height != original_height:
-                annotated_frame = cv2.resize(frame, (display_width, display_height))
-            else:
-                annotated_frame = frame.copy()
-            # Always draw last known boxes so they stay on screen
-            if last_known_boxes:
-                _draw_detection_boxes(annotated_frame, last_known_boxes)
-            last_annotated_frame = annotated_frame
-        else:
-            # Resize for faster processing
-            if SCALE_FACTOR != 1.0:
-                frame_resized = cv2.resize(frame, (process_width, process_height))
-            else:
-                frame_resized = frame
-            
-            # Run YOLOv11 detection
+        now = time.time()
+
+        # ---- Throttle to TARGET_FPS ----
+        wait = (1.0 / TARGET_FPS) - (now - last_frame_time)
+        if wait > 0:
+            time.sleep(wait)
+        last_frame_time = now = time.time()
+
+        # ---- Resize for display (never draw on the raw buffer) ----
+        disp = cv2.resize(frame, (disp_w, disp_h)) if scale != 1.0 else frame.copy()
+
+        # ---- Adaptive inference rate ----
+        # Run YOLO every frame when L1/L2 is active so the tracker gets fresh data
+        # as fast as possible. Drop back to INFER_EVERY when everything is L0.
+        is_hot = last_raw_lvl >= 1 or drowning_start_time is not None
+        current_infer_every = 1 if is_hot else INFER_EVERY
+
+        # ---- YOLO inference ----
+        if frame_count % current_infer_every == 0:
             results = model.predict(
-                frame_resized,
-                conf=confidence_threshold,
-                imgsz=infer_imgsz,
+                disp,
+                conf=INFERENCE_CONF,
+                imgsz=YOLO_IMGSZ,
                 iou=YOLO_IOU,
                 device=yolo_device,
-                half=use_half,
+                half=_use_half,
                 verbose=False,
             )[0]
 
-            # Build base display frame (clean, no YOLO default colors)
-            if display_width != original_width or display_height != original_height:
-                annotated_frame = cv2.resize(frame, (display_width, display_height))
-            else:
-                annotated_frame = frame.copy()
-
-            # Scale factors: inference coords → display coords
-            scale_x = display_width / process_width
-            scale_y = display_height / process_height
-
-            # Process detections
-            detections = results.boxes
-            if detections is not None and len(detections) > 0:
-                max_alert_level = 0
-                max_conf = 0
-                detected_class_name = "Unknown"
-
-                # --- Step 1: Collect all raw boxes ---
-                raw_boxes = []
-                for box in detections:
-                    class_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    try:
-                        class_name = model.names[class_id]
-                    except Exception:
-                        class_name = f"class_{class_id}"
-                    alert_level, _ = get_alert_level_for_class(class_name)
-
-                    # Confidence downgrade: Level 2 below 80% → treat as Level 1
-                    # (affects box colour AND smoothing vote)
-                    if alert_level == 2 and conf < 0.80:
-                        alert_level = 1
-
+            raw_boxes = []
+            if results.boxes is not None:
+                for box in results.boxes:
+                    cls_id   = int(box.cls[0])
+                    conf     = float(box.conf[0])
+                    cls_name = model.names[cls_id]
+                    lvl      = class_to_level(cls_name, conf)
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
                     raw_boxes.append({
-                        'x1': int(x1 * scale_x), 'y1': int(y1 * scale_y),
-                        'x2': int(x2 * scale_x), 'y2': int(y2 * scale_y),
-                        'conf': conf, 'alert_level': alert_level, 'class_name': class_name
+                        'x1': int(x1), 'y1': int(y1),
+                        'x2': int(x2), 'y2': int(y2),
+                        'conf': conf, 'alert_level': lvl, 'cls': cls_name,
                     })
 
-                # --- Step 2: Cross-class NMS (remove duplicate boxes for same region) ---
-                filtered_boxes = cross_class_nms(raw_boxes, iou_threshold=YOLO_IOU)
+            last_filtered = cross_class_nms(raw_boxes)
+            tracks        = _update_tracks(tracks, last_filtered, now=now)
+            tracks        = _merge_tracks(tracks)
+            last_raw_lvl  = max((b['alert_level'] for b in last_filtered), default=0)
 
-                # Persist boxes so skipped frames can redraw them
-                last_known_boxes = filtered_boxes
+            # Push raw YOLO class/conf (from history, not gated t['cls']) to pred_buffer
+            pred_entry = [
+                (t.get('id', idx),
+                 t['history'][-1][1] if t['history'] else t['cls'],
+                 t['history'][-1][2] if t['history'] else t['conf'])
+                for idx, t in enumerate(tracks)
+            ]
+            pred_buffer.append((now, pred_entry))
 
-                # --- Step 3: Draw surviving boxes and track highest alert level ---
-                _draw_detection_boxes(annotated_frame, filtered_boxes)
+        # Freeze box positions + track IDs for display buffer (class resolved at pop time)
+        snap_data = [(t.get('id', idx), t['x1'], t['y1'], t['x2'], t['y2'])
+                     for idx, t in enumerate(tracks)]
+        raw_frame_buffer.append((now, disp.copy(), snap_data))
 
-                for det in filtered_boxes:
-                    alert_level = det['alert_level']
-                    conf        = det['conf']
-                    class_name  = det['class_name']
+        # ---- FPS counter ----
+        if frame_count % 30 == 0:
+            t = time.time()
+            current_fps = 30 / max(t - fps_time, 0.001)
+            fps_time = t
 
-                    # Track highest alert level
-                    if alert_level > max_alert_level or (alert_level == max_alert_level and conf > max_conf):
-                        max_alert_level = alert_level
-                        max_conf = conf
-                        detected_class_name = class_name
+        # ---- Delayed display + state machine ----
+        if raw_frame_buffer and (now - raw_frame_buffer[0][0]) >= DISPLAY_DELAY_S:
+            pop_ts, display_frame, snap_data = raw_frame_buffer.popleft()
+            disp_now = time.time()
 
-                # --- Step 4: Push this frame's result to the smoothing window ---
-                level_vote_window.append(max_alert_level)
-                conf_vote_window.append(max_conf)
+            d_drawlist = _pred_buf_resolve(pred_buffer, snap_data, last_resolved_cls)
 
-                # Derive consensus alert level across recent frames
-                smoothed_level = _smoothed_alert_level(level_vote_window, conf_vote_window)
+            d_max_lvl  = max((d['alert_level'] for d in d_drawlist), default=0)
+            d_max_conf = max(
+                (d['conf'] for d in d_drawlist if d['alert_level'] == d_max_lvl),
+                default=0.0,
+            )
+            d_incident = None
+            if d_max_lvl == 1:
+                inc = max((d for d in d_drawlist if d['alert_level'] == 1),
+                          key=lambda d: d['conf'], default=None)
+                if inc:
+                    d_incident = (inc['x1'], inc['y1'], inc['x2'], inc['y2'])
 
-                # Process based on smoothed (consensus) alert level
-                if smoothed_level >= 1:  # Level 1 or Level 2
-                    conf_percentage = round(max_conf * 100, 2)
-
-                    # Apply per-level confidence floor (uses raw frame conf as gate)
-                    effective_level = smoothed_level
-                    if smoothed_level == 1 and LEVEL1_MIN_CONF > 0.0 and max_conf < LEVEL1_MIN_CONF:
-                        # Conf below floor: keep timers running but suppress alert this frame.
-                        # Do NOT reset drowning timer — sustained low-conf Level 1 is still risky.
-                        # Do NOT skip frame encode — that stutters the video stream.
-                        effective_level = 0  # treat as no-alert for this frame only
-
-                    # ========== ALERT LEVEL LOGIC ==========
-                    # Level 2 fires in two ways:
-                    #   a) DIRECT: model detects Level2_Critical / Physical Collapse
-                    #   b) TEMPORAL: Level 1 sustained for 2s → escalated
-                    # Level 1: risky behavior — audio beep, start duration timer
-                    # Level 0: safe — reset timer, no alert
-                    #
-                    # CONFIDENCE DOWNGRADE: if effective_level is 2 but confidence
-                    # is below 80%, treat it as Level 1 (risky) instead.
-
-                    # Safety defaults — ensure every variable is bound regardless of branch
-                    alert_level      = 0
-                    alert_type       = 'Level 0 - Safe'
-                    audio_cue        = 'none'
-                    reason           = ''
-                    drowning_duration = 0.0
-                    should_fire      = False
-
-                    if effective_level == 2 and max_conf < 0.80:
-                        effective_level = 1  # downgrade — not confident enough for critical
-
-                    if effective_level == 2:
-                        # ---- DIRECT Level 2 from model (Level2_Critical / Physical Collapse) ----
-                        drowning_miss_frames = 0
-                        drowning_duration = (current_time - drowning_start_time) if drowning_start_time else 0
-                        alert_level = 2
-                        alert_type = 'Level 2 - Drowning'
-                        audio_cue = 'alarm'
-                        reason = f'{detected_class_name} - CRITICAL DETECTED DIRECTLY BY MODEL'
-                        # Fire once per incident (confidence already >= 80% from gate above)
-                        should_fire = not level2_triggered
-
-                    elif effective_level == 1:
-                        # Level 1 OR downgraded Level 2 — start/continue escalation timer.
-                        # False-positive protection: the smoothing window requires 60% of
-                        # the last 15 frames (~9 frames) to vote Level 1 before we reach
-                        # here, so brief/noisy detections never start the timer.
-                        drowning_miss_frames = 0
-                        if drowning_start_time is None:
-                            drowning_start_time = current_time
-                            continuous_drowning_frames = 1
-                        else:
-                            continuous_drowning_frames += 1
-
-                        drowning_duration = current_time - drowning_start_time
-
-                        # TEMPORAL ESCALATION: sustained risky for 5+ seconds → Level 2
-                        if drowning_duration >= LEVEL_2_DURATION_THRESHOLD:
-                            alert_level = 2
-                            alert_type = 'Level 2 - Drowning'
-                            audio_cue = 'alarm'
-                            reason = f'Risky behavior sustained for {drowning_duration:.1f}s - ESCALATED TO DROWNING'
-                            should_fire = not level2_triggered
-                        else:
-                            # Timer running — show Level 1 alert with countdown
-                            alert_level = 1
-                            alert_type = 'Level 1 - Risky'
-                            audio_cue = 'beep'
-                            reason = f'{detected_class_name} detected ({drowning_duration:.1f}s / {LEVEL_2_DURATION_THRESHOLD:.0f}s)'
-                            should_fire = True
-                    else:
-                        # Level 0 (Swimming) - hysteresis grace period before reset
-                        # Allow up to GRACE_PERIOD_FRAMES (~2s) before resetting timer
-                        drowning_miss_frames += 1
-                        if drowning_miss_frames >= GRACE_PERIOD_FRAMES:
-                            drowning_start_time = None
-                            continuous_drowning_frames = 0
-                            drowning_miss_frames = 0
-                            level2_triggered = False   # Reset — incident over
-                            level2_trigger_time = None # Clear countdown
-                        drowning_duration = (current_time - drowning_start_time) if drowning_start_time else 0
-
-                        # Don't fire alert for Level 0 (safe swimming)
-                        should_fire = False
-                    
-                    # Only log and alert if this event should fire
-                    if should_fire:
-                        # Level 2: one log per incident guaranteed by level2_triggered flag +
-                        #          80% confidence gate already applied in should_fire above.
-                        # Level 1: avoid duplicate events within 2 seconds.
-                        should_log = True
-                        if alert_level == 1 and detection_history:
-                            last_detection = detection_history[-1]
-                            time_diff = current_time - last_detection['timestamp']
-                            if time_diff < 2.0 and last_detection['level'] == 1:
-                                should_log = False
-
-                        if should_log:
-                            detection_event = {
-                                'type': alert_type,
-                                'level': alert_level,
-                                'audio': audio_cue,        # 'alarm' | 'beep' | 'none'
-                                'confidence': conf_percentage,
-                                'timestamp': current_time,
-                                'class': detected_class_name,
-                                'count': len(detections),
-                                'duration': round(drowning_duration, 1) if drowning_duration > 0 else 0,
-                                'reason': reason
-                            }
-                            detection_history.append(detection_event)
-                            latest_detections.append(detection_event)
-
-                            # Keep only last 50 detections
-                            if len(detection_history) > 50:
-                                detection_history.pop(0)
-
-                            # Level 2: trigger Telegram / SMS alert & set flags
-                            if alert_level == 2:
-                                send_telegram_alert(detection_event)
-                                level2_triggered = True          # One log per incident
-                                level2_trigger_time = current_time  # Start 20s response countdown
-                    
-                    # Display alert banner (top-left, clean pill style)
-                    if alert_level == 2:
-                        # LEVEL 2: DROWNING EMERGENCY (direct model detection OR temporal escalation)
-                        bg_color    = (0, 0, 160)      # Dark red
-                        accent      = (0, 0, 220)      # Lighter red accent line
-                        icon        = '!! DROWNING EMERGENCY'
-                        # 10/20 rule: show 20-second response countdown
-                        if level2_trigger_time is not None:
-                            response_remaining = max(0.0, RESPONSE_COUNTDOWN - (current_time - level2_trigger_time))
-                            if effective_level == 2:
-                                detail = f'{detected_class_name}  {conf_percentage:.0f}% - RESPOND IN {response_remaining:.0f}s'
-                            else:
-                                detail = f'Risky sustained {drowning_duration:.0f}s - RESPOND IN {response_remaining:.0f}s'
-                        else:
-                            detail  = f'{detected_class_name}  {conf_percentage:.0f}%'
-                    elif alert_level == 1:
-                        # LEVEL 1: RISKY (show detection timer: Xs / 10s to escalation)
-                        bg_color    = (0, 130, 235)    # Orange
-                        accent      = (0, 170, 255)    # Lighter orange accent line
-                        icon        = 'RISKY BEHAVIOR'
-                        if drowning_duration > 0:
-                            detail = f'{detected_class_name}  {conf_percentage:.0f}% - {drowning_duration:.1f}s/{LEVEL_2_DURATION_THRESHOLD:.0f}s'
-                        else:
-                            detail = f'{detected_class_name}  {conf_percentage:.0f}%'
-                    else:
-                        # LEVEL 0: SAFE (shouldn't reach here but handle gracefully)
-                        bg_color    = (220, 180, 0)    # Blue (safe)
-                        accent      = (255, 200, 0)    # Lighter blue
-                        icon        = 'SAFE'
-                        detail      = f'{detected_class_name}  {conf_percentage:.0f}%'
-
-                    pad_x, pad_y = 14, 8
-                    font         = cv2.FONT_HERSHEY_SIMPLEX
-
-                    # Measure text sizes
-                    (iw, ih), _ = cv2.getTextSize(icon,   font, 0.85, 2)
-                    (dw, dh), _ = cv2.getTextSize(detail, font, 0.55, 1)
-
-                    banner_w = max(iw, dw) + pad_x * 2
-                    banner_h = ih + dh + pad_y * 3
-                    bx, by   = 12, 12
-
-                    # Shadow
-                    cv2.rectangle(annotated_frame,
-                                  (bx + 3, by + 3),
-                                  (bx + banner_w + 3, by + banner_h + 3),
-                                  (0, 0, 0), -1)
-                    # Main background
-                    cv2.rectangle(annotated_frame,
-                                  (bx, by),
-                                  (bx + banner_w, by + banner_h),
-                                  bg_color, -1)
-                    # Left accent bar
-                    cv2.rectangle(annotated_frame,
-                                  (bx, by),
-                                  (bx + 5, by + banner_h),
-                                  accent, -1)
-                    # Icon / title text
-                    cv2.putText(annotated_frame, icon,
-                                (bx + pad_x, by + pad_y + ih),
-                                font, 0.85, (255, 255, 255), 2, cv2.LINE_AA)
-                    # Detail text (slightly smaller, slightly transparent-looking)
-                    cv2.putText(annotated_frame, detail,
-                                (bx + pad_x, by + pad_y * 2 + ih + dh),
-                                font, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
-                else:
-                    # Level 0 (smoothed) — count toward grace period
-                    drowning_miss_frames += 1
-                    if drowning_miss_frames >= GRACE_PERIOD_FRAMES:
-                        drowning_start_time = None
-                        continuous_drowning_frames = 0
-                        drowning_miss_frames = 0
-                        level2_triggered = False   # Reset — incident over
-                        level2_trigger_time = None # Clear countdown
+            if d_max_lvl >= 1:
+                report_conf_ema = 0.60 * d_max_conf + 0.40 * report_conf_ema
             else:
-                # No detections this frame — vote Level 0, count toward grace period
-                level_vote_window.append(0)
-                conf_vote_window.append(0.0)
-                drowning_miss_frames += 1
-                if drowning_miss_frames >= GRACE_PERIOD_FRAMES:
-                    drowning_start_time = None
-                    continuous_drowning_frames = 0
-                    drowning_miss_frames = 0
-                    level2_triggered = False   # Reset — incident over
-                    level2_trigger_time = None # Clear countdown
-                    last_known_boxes = []      # Clear boxes — person has gone
-                elif last_known_boxes:
-                    # Within grace period: keep drawing last known boxes on the
-                    # fresh frame so the box doesn't flicker when detection briefly drops
-                    _draw_detection_boxes(annotated_frame, last_known_boxes)
-            
-            # FPS counter — recalculate every 30 frames, draw every frame
-            if frame_count % 30 == 0:
-                fps_current_time = time.time()
-                current_fps = 30 / max(fps_current_time - fps_time, 0.001)
-                fps_time = fps_current_time
+                report_conf_ema = max(0.0, report_conf_ema - 0.02)
 
-            # FPS is tracked for /get_stats but not drawn on video
-            
-            last_annotated_frame = annotated_frame
-        
-        # Encode frame
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
-        ret, buffer = cv2.imencode('.jpg', annotated_frame, encode_param)
-        frame = buffer.tobytes()
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-    
+            # ---- Escalation state machine (two-phase confirmation) ----
+            # Phase 1: L1 must be continuously detected for CONFIRM_SECONDS
+            #          before the escalation timer even starts.
+            # Phase 2: Once confirmed, escalation timer counts toward L2.
+            #          If L1 drops out, timer pauses (grace period still applies).
+            if d_max_lvl == 1:
+                last_drowning_time = disp_now
+                if d_incident:
+                    incident_box = d_incident
+
+                # Phase 1: continuous confirmation
+                if confirm_start_time is None:
+                    confirm_start_time = disp_now
+
+                confirm_elapsed = disp_now - confirm_start_time
+                if confirm_elapsed >= CONFIRM_SECONDS and drowning_start_time is None:
+                    drowning_start_time = disp_now
+                    print(f"[CONFIRMED] Drowning verified for {confirm_elapsed:.1f}s — "
+                          f"escalation timer started (conf {d_max_conf:.2f})")
+            else:
+                # L1 absent — break the continuous confirmation streak
+                confirm_start_time = None
+
+                if last_drowning_time is not None \
+                        and (disp_now - last_drowning_time) >= GRACE_TIME:
+                    print("[ESCALATION] Reset — drowning absent for grace period")
+                    _reset_state()
+
+            alert_level       = 0
+            drowning_duration = 0.0
+            if drowning_start_time is not None:
+                drowning_duration = disp_now - drowning_start_time
+                if drowning_duration >= ESCALATION_TIME:
+                    alert_level = 2
+                    if not level2_triggered:
+                        level2_triggered    = True
+                        level2_trigger_time = disp_now
+                        send_telegram_alert()
+                        _log_event(2, 'alarm', report_conf_ema * 100)
+                else:
+                    alert_level = 1
+                    _log_event(1, 'beep', report_conf_ema * 100)
+
+            draw_boxes(display_frame, d_drawlist, alert_level, incident_box)
+            draw_banner(display_frame, alert_level, report_conf_ema * 100,
+                        drowning_duration, level2_trigger_time)
+            _, buf = cv2.imencode('.jpg', display_frame,
+                                  [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
+
     cap.release()
-    print("✅ Stream ended")
+    print("Stream ended")
 
 # ======================== ROUTES ========================
 @app.route('/')
 def index():
-    """Serve dashboard"""
     return render_template('dashboard_live.html')
 
 @app.route('/video_feed')
 def video_feed():
-    """Stream video with detection"""
     global current_source
     if current_source is not None:
         return Response(generate_frames(current_source),
-                       mimetype='multipart/x-mixed-replace; boundary=frame')
+                        mimetype='multipart/x-mixed-replace; boundary=frame')
     return Response("No source selected", status=400)
 
 @app.route('/start_webcam', methods=['POST'])
 def start_webcam():
-    """Start webcam detection"""
-    global current_source, detection_active, drowning_start_time, continuous_drowning_frames, level2_triggered, level2_trigger_time
-    
-    cap_test = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    cap_test.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap_test.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap_test.set(cv2.CAP_PROP_FPS, 30)
-    cap_test.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap_test.release()
-    
-    drowning_start_time = None
-    continuous_drowning_frames = 0
-    level2_triggered = False
-    level2_trigger_time = None
-    
-    current_source = 0
+    global current_source, detection_active
+    _reset_state()
+    current_source   = 0
     detection_active = True
     return jsonify({"status": "success", "message": "Webcam started"})
 
 @app.route('/stop_detection', methods=['POST'])
 def stop_detection():
-    """Stop detection"""
-    global detection_active, current_source, drowning_start_time, continuous_drowning_frames, level2_triggered, level2_trigger_time
+    global detection_active, current_source
     detection_active = False
-    current_source = None
-    drowning_start_time = None
-    continuous_drowning_frames = 0
-    level2_triggered = False
-    level2_trigger_time = None
+    current_source   = None
+    _reset_state()
     return jsonify({"status": "success", "message": "Detection stopped"})
 
 @app.route('/upload_video', methods=['POST'])
 def upload_video():
-    """Upload and process video"""
-    global current_source, detection_active, drowning_start_time, continuous_drowning_frames, level2_triggered, level2_trigger_time
-
-    # Stop any active stream before switching source
+    global current_source, detection_active
     detection_active = False
-    current_source = None
-
+    current_source   = None
     if 'video' not in request.files:
         return jsonify({"status": "error", "message": "No video file provided"}), 400
-
     file = request.files['video']
     if not file or file.filename == '':
         return jsonify({"status": "error", "message": "No file selected"}), 400
-
     try:
-        filename = secure_filename(file.filename)
-        if not filename:
-            # Fallback name in case secure_filename strips everything
-            filename = f"upload_{int(time.time())}.mp4"
+        filename = secure_filename(file.filename) or f"upload_{int(time.time())}.mp4"
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-
         if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
             return jsonify({"status": "error", "message": "File saved but appears empty"}), 500
-
-        drowning_start_time = None
-        continuous_drowning_frames = 0
-        level2_triggered = False
-        level2_trigger_time = None
-        current_source = filepath
+        _reset_state()
+        current_source   = filepath
         detection_active = True
-
-        return jsonify({"status": "success", "message": f"Video uploaded: {filename}", "filename": filename})
+        return jsonify({"status": "success",
+                        "message": f"Video uploaded: {filename}",
+                        "filename": filename})
     except Exception as e:
         return jsonify({"status": "error", "message": f"Upload failed: {str(e)}"}), 500
 
-
 @app.errorhandler(413)
-def request_entity_too_large(e):
+def too_large(e):
     return jsonify({"status": "error", "message": "File too large (max 500 MB)"}), 413
-
-@app.route('/set_confidence', methods=['POST'])
-def set_confidence():
-    """Update confidence threshold"""
-    global confidence_threshold
-    data = request.get_json()
-    conf = data.get('confidence', 50)
-    confidence_threshold = float(conf) / 100
-    return jsonify({"status": "success", "confidence": confidence_threshold * 100})
 
 @app.route('/get_stats', methods=['GET'])
 def get_stats():
-    """Get detection statistics"""
     return jsonify({
         "active": detection_active,
-        "confidence": confidence_threshold * 100,
-        "fps": round(current_fps, 1),
-        "source": "Webcam" if current_source == 0 else ("Video" if current_source else "None")
+        "fps":    round(current_fps, 1),
     })
 
 @app.route('/get_detections', methods=['GET'])
 def get_detections():
-    """Get latest detections for logging"""
     global latest_detections
-    
-    detections = latest_detections.copy()
+    out = latest_detections.copy()
     latest_detections.clear()
-    
-    return jsonify({
-        "status": "success",
-        "detections": detections
-    })
+    if not out:
+        return jsonify({"status": "success", "detections": []})
 
-@app.route('/get_model_metrics', methods=['GET'])
-def get_model_metrics():
-    """Get model iteration metrics"""
-    metrics = load_model_metrics()
-    return jsonify(metrics)
-
-@app.route('/get_class_mapping', methods=['GET'])
-def get_class_mapping():
-    """Get class to alert level mapping"""
-    mapping = load_class_mapping()
-    if mapping:
-        return jsonify(mapping)
-    return jsonify({"error": "Class mapping not found"}), 404
+    # Aggregate all queued events into a single summary per poll.
+    # Return only the highest-level event with mean confidence across all events at that level.
+    # This ensures the frontend always receives one stable averaged data point per second,
+    # never a burst of fluctuating raw per-frame values.
+    max_lvl    = max(e['level'] for e in out)
+    lvl_events = [e for e in out if e['level'] == max_lvl]
+    avg_conf   = round(sum(e['confidence'] for e in lvl_events) / len(lvl_events), 2)
+    summary = {
+        'type':       lvl_events[-1]['type'],
+        'level':      max_lvl,
+        'audio':      lvl_events[-1]['audio'],
+        'confidence': avg_conf,
+        'timestamp':  lvl_events[-1]['timestamp'],
+        'count':      len(out),   # diagnostic: how many raw events were merged
+    }
+    return jsonify({"status": "success", "detections": [summary]})
 
 # ======================== MAIN ========================
 if __name__ == '__main__':
-    # Clean startup banner
-    n_classes = len(model.names) if hasattr(model, 'names') else '?'
-    print("")
-    print("  ╔══════════════════════════════════════════╗")
-    print("  ║   🌊  Drowning Detection Dashboard        ║")
-    print(f"  ║   📦  Model : best.pt  |  {n_classes} classes       ║")
-    print("  ║   🌐  http://localhost:5000               ║")
-    print("  ╚══════════════════════════════════════════╝")
-    print("")
+    mdl  = _metrics.get('current_model', 'best.pt')
+    n    = len(model.names) if hasattr(model, 'names') else '?'
+    mAP  = _metrics.get('training', {}).get('mAP50', 'N/A')
+    prec = _metrics.get('training', {}).get('precision', 'N/A')
+    rec  = _metrics.get('training', {}).get('recall', 'N/A')
+    print(f"\n  Dashboard → http://localhost:5000")
+    print(f"  Model   : {mdl} | {n} classes | mAP50={mAP}  prec={prec}  recall={rec}")
+    print(f"  L1 gate : conf >= {DROWNING_CONF_MIN}")
+    print(f"  Confirm : {CONFIRM_SECONDS}s continuous L1 → escalation timer ({ESCALATION_TIME}s to L2)\n")
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
