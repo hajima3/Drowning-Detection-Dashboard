@@ -780,6 +780,10 @@ def generate_frames(source):
                         level2_trigger_time = disp_now
                         send_telegram_alert()
                         _log_event(2, 'alarm', report_conf_ema * 100)
+                    elif level2_trigger_time and (disp_now - level2_trigger_time) >= RESPONSE_COUNTDOWN:
+                        # Response window expired — auto-reset so monitoring restarts fresh
+                        print("[ESCALATION] Response window expired — resetting for new detection cycle")
+                        _reset_state()
                 else:
                     alert_level = 1
                     _log_event(1, 'beep', report_conf_ema * 100)
