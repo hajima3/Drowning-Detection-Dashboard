@@ -50,7 +50,9 @@ After the 20-second response window expires, the system auto-resets and resumes 
 | ---------------- | --------------------------- |
 | File             | `best.pt`                   |
 | Architecture     | YOLOv11-L                   |
-| Parameters       | 25,312,793                  |
+| Parameters       | 25,281,625                  |
+| Layers (fused)   | 191                         |
+| GFLOPs           | 86.6                        |
 | Classes          | swimming, floating, drowning|
 | Training epochs  | 200 (best at epoch 189)     |
 | mAP50            | 99.21%                      |

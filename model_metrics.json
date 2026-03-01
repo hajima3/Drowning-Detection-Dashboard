@@ -10,12 +10,14 @@
     "mAP50_95": 0.84471,
     "precision": 0.98138,
     "recall": 0.98774,
-    "parameters": 25312793
+    "parameters": 25281625,
+    "layers": 191,
+    "GFLOPs": 86.6
   },
   "alert_levels": {
     "Level 0": "Safe — swimming or floating detected. No action.",
-    "Level 1": "Drowning detected at >= 40% confidence. Audio beep plays. 5-second escalation timer starts.",
-    "Level 2": "EMERGENCY — drowning sustained for 5 seconds. Audio alarm loops. Telegram alert dispatched. 20s response countdown."
+    "Level 1": "Drowning detected at >= 40% confidence. Audio beep plays. 2-second confirmation then 5-second escalation timer starts.",
+    "Level 2": "EMERGENCY — drowning sustained for 5 seconds post-confirmation. Audio alarm plays once. Telegram alert dispatched. 20s response countdown then auto-reset."
   },
   "class_to_level": {
     "swimming": 0,
