@@ -723,6 +723,7 @@
         let detectionPollingInterval = null;
         let level1Audio = null;
         let level2Audio = null;
+        let alarmPlaying = false;   // true while Level 2 alarm is active; prevents paused-ended restarts
 
         function initAlertSounds() {
             if (!level1Audio) {
@@ -746,9 +747,11 @@
                     }
                 } else if (audioCue === 'alarm') {
                     initAlertSounds();
-                    if (level2Audio && level2Audio.paused) {
+                    if (level2Audio && !alarmPlaying) {
+                        alarmPlaying = true;
                         level2Audio.currentTime = 0;
-                        level2Audio.play().catch(err => console.log('Alarm audio failed:', err));
+                        level2Audio.onended = () => { alarmPlaying = false; };
+                        level2Audio.play().catch(err => { console.log('Alarm audio failed:', err); alarmPlaying = false; });
                     }
                 }
             } catch (error) {
@@ -765,6 +768,7 @@
                 if (level2Audio) {
                     level2Audio.pause();
                     level2Audio.currentTime = 0;
+                    alarmPlaying = false;
                 }
             } catch (error) {
                 console.log('Error stopping alert sounds:', error);
@@ -783,6 +787,9 @@
                 // Update FPS display
                 const fpsEl = document.getElementById('fpsDisplay');
                 if (fpsEl) fpsEl.textContent = stats.active ? stats.fps + ' FPS' : '--';
+
+                // Stop alarm as soon as backend resets (alert_level 2 → 0)
+                if (stats.alert_level === 0 && alarmPlaying) stopAlertSounds();
 
                 if (data.status === 'success' && data.detections && data.detections.length > 0) {
                     data.detections.forEach(detection => {

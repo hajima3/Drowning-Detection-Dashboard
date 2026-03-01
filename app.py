@@ -549,9 +549,10 @@ for _ in range(3):   # 3 warmup frames to fully settle cuDNN kernel selection
 del _dummy
 
 # ======================== GLOBAL STATE ========================
-current_source   = None
-detection_active = False
-current_fps      = 0.0
+current_source      = None
+detection_active    = False
+current_fps         = 0.0
+current_alert_level = 0   # exposed via /get_stats so the frontend can stop audio on reset
 
 latest_detections = []   # consumed by /get_detections
 detection_history = []   # last 50 events (debounced)
@@ -598,7 +599,7 @@ def _log_event(level, audio, conf_pct):
 # ======================== VIDEO STREAM ========================
 def generate_frames(source):
     global detection_active
-    global current_fps
+    global current_fps, current_alert_level
     global confirm_start_time, drowning_start_time, last_drowning_time
     global level2_triggered, level2_trigger_time, incident_box
 
@@ -788,6 +789,7 @@ def generate_frames(source):
                     alert_level = 1
                     _log_event(1, 'beep', report_conf_ema * 100)
 
+            current_alert_level = alert_level
             draw_boxes(display_frame, d_drawlist, alert_level, incident_box)
             draw_banner(display_frame, alert_level, report_conf_ema * 100,
                         drowning_duration, level2_trigger_time)
@@ -859,8 +861,9 @@ def too_large(e):
 @app.route('/get_stats', methods=['GET'])
 def get_stats():
     return jsonify({
-        "active": detection_active,
-        "fps":    round(current_fps, 1),
+        "active":      detection_active,
+        "fps":         round(current_fps, 1),
+        "alert_level": current_alert_level,
     })
 
 @app.route('/get_detections', methods=['GET'])
