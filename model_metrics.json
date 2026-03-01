@@ -2,13 +2,14 @@
   "current_model": "best.pt",
   "total_classes": 3,
   "classes": ["swimming", "floating", "drowning"],
-  "deployed_date": "2026-02-28",
+  "deployed_date": "2026-03-01",
   "training": {
-    "epochs": 50,
-    "mAP50": 0.9867,
-    "mAP50_95": 0.73482,
-    "precision": 0.95798,
-    "recall": 0.97787,
+    "epochs": 200,
+    "best_epoch": 189,
+    "mAP50": 0.99206,
+    "mAP50_95": 0.84471,
+    "precision": 0.98138,
+    "recall": 0.98774,
     "parameters": 25312793
   },
   "alert_levels": {

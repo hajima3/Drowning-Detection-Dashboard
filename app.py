@@ -56,14 +56,13 @@ with open(_BASE / 'model_metrics.json', encoding='utf-8-sig') as _f:
     _metrics = json.load(_f)
 
 # ── Class vote weights from model metrics ────────────────────────────────────
-# drowning_weight = recall/precision ≈ 1.021  (compensates for recall > precision)
-# safe_weight     = 1 - FNR           ≈ 0.978
-_m_precision = _metrics['training']['precision']   # 0.958
-_m_recall    = _metrics['training']['recall']       # 0.978
-_m_fnr       = 1.0 - _m_recall
+# drowning_weight = recall/precision ≈ 1.006  (compensates for recall > precision)
+# safe_weight     = 1 - FNR           ≈ 0.988
+_m_precision = _metrics['training']['precision']   # 0.981
+_m_recall    = _metrics['training']['recall']       # 0.988
 
 _CLASS_VOTE_WEIGHT: dict[str, float] = {
-    cls: (_m_recall / _m_precision) if _CLASS_LEVEL.get(cls, 0) >= 1 else (1.0 - _m_fnr)
+    cls: (_m_recall / _m_precision) if _CLASS_LEVEL.get(cls, 0) >= 1 else _m_recall
     for cls in _CLASS_LEVEL
 }
 
@@ -88,6 +87,11 @@ CONFIRM_SECONDS  = float(os.getenv('CONFIRM_SECONDS',             _alert.get('co
 ESCALATION_TIME  = float(os.getenv('LEVEL_2_DURATION_THRESHOLD', _alert['escalation_time_s']))
 RESPONSE_COUNTDOWN = float(os.getenv('RESPONSE_COUNTDOWN',       _alert['response_countdown_s']))
 GRACE_TIME       = float(os.getenv('GRACE_TIME',                 _alert['grace_time_s']))
+
+# Anti-flicker hysteresis
+CONFIRM_DROPOUT_S    = float(os.getenv('CONFIRM_DROPOUT_S',  1.0))   # L1 must drop this long to reset confirmation
+EXIT_DOMINANCE_FRAC  = 0.60   # once L1, exit only if dominance < MIN_DOMINANCE × this
+EXIT_CONSEC_MIN      = 2      # once L1, need consecutive drowning < this to exit
 
 # Box tracker
 TRACK_IOU_MIN  = float(os.getenv('TRACK_IOU_MIN',  0.45))   # min IoU to link detection to existing track
@@ -269,8 +273,7 @@ def _update_tracks(tracks: list, detections: list, now: float = 0.0) -> list:
 
 def _merge_tracks(tracks: list) -> list:
     """Merge overlapping tracks (IoU >= 0.50). Keep higher alert_level, combine histories."""
-    merged = []
-    skip   = set()
+    skip = set()
     for i, a in enumerate(tracks):
         if i in skip:
             continue
@@ -280,29 +283,30 @@ def _merge_tracks(tracks: list) -> list:
                 continue
             bb = (b['x1'], b['y1'], b['x2'], b['y2'])
             if _iou(ba, bb) >= 0.50:
-                # Keep the dominant track; absorb the other's timestamped history
                 dominant = a if (a['alert_level'], a['conf']) >= (b['alert_level'], b['conf']) else b
                 absorb   = b if dominant is a else a
                 dominant['history'].extend(absorb['history'])
-                # Keep history sorted chronologically after merge
                 dominant['history'].sort(key=lambda e: e[0])
-                # Dominant track keeps its own ID; absorb's ID is discarded.
                 skip.add(j if dominant is a else i)
-        merged.append(a)
     return [t for i, t in enumerate(tracks) if i not in skip]
 
-def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) -> list:
+def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None,
+                      last_resolved_lvl: dict = None) -> list:
     """
-    Matrix-scored class resolution with temporal smoothing.
+    Matrix-scored class resolution with 5-input AND gate.
 
     Per track, builds observation matrix  M[frame, class]  of raw confidences.
     Temporal weight vector  W[frame]  = Past(0.5) / Present(1.0) / Future(1.5).
     Class scores = W @ M  (matrix dot product per track).
 
-    Drowning triggers L1 only when ALL gates pass:
-      A) Wins argmax  (highest weighted score)
-      B) Dominance ≥ MIN_DOMINANCE  (holds ≥55% of total score — anti-flicker)
-      C) ≥ CONSEC_MIN_FRAMES consecutive present+future drowning frames
+    Drowning triggers L1 only when ALL 5 AND-gate inputs are HIGH:
+      G1) argmax       — drowning has the highest W@M score
+      G2) conf_floor   — mean drowning confidence ≥ DROWNING_CONF_MIN
+      G3) dominance    — drowning holds ≥ MIN_DOMINANCE of total score
+      G4) consecutive  — ≥ CONSEC_MIN_FRAMES consecutive drowning in present+future
+      G5) dual_region  — drowning detected in BOTH present AND future windows
+
+    If ANY gate is LOW (False), alert_level stays 0 regardless of score.
     Tie-break: score → mean_conf → future_count → retain previous class.
     """
     if not snap_data or not pred_buffer:
@@ -321,14 +325,16 @@ def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) 
     _cls_idx   = {c: i for i, c in enumerate(_cls_names)}
     n_cls      = len(_cls_names)
 
-    # Build frame weight vector  W[frame]
+    # Build frame weight vector  W[frame]  and region flags
     W = np.empty(n, dtype=np.float32)
-    _is_future = np.zeros(n, dtype=bool)
+    _is_present = np.zeros(n, dtype=bool)
+    _is_future  = np.zeros(n, dtype=bool)
     for i in range(n):
         if i < past_count:
             W[i] = PAST_WEIGHT
         elif i < past_count + present_count:
             W[i] = PRESENT_WEIGHT
+            _is_present[i] = True
         else:
             W[i] = FUTURE_WEIGHT
             _is_future[i] = True
@@ -364,15 +370,18 @@ def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) 
 
         # Build observation matrix  M[frame, class]  for this track
         M = np.zeros((n, n_cls), dtype=np.float32)
-        raw_confs:  dict = {}   # cls_name → [conf, ...] for mean tie-break
-        fut_counts: dict = {}   # cls_name → count in future region
+        raw_confs:    dict = {}   # cls_name → [conf, ...]
+        present_cnt:  dict = {}   # cls_name → count in present region
+        future_cnt:   dict = {}   # cls_name → count in future region
 
         for (f_idx, ci, conf) in obs:
             M[f_idx, ci] = conf
             cn = _cls_names[ci]
             raw_confs.setdefault(cn, []).append(conf)
+            if _is_present[f_idx]:
+                present_cnt[cn] = present_cnt.get(cn, 0) + 1
             if _is_future[f_idx]:
-                fut_counts[cn] = fut_counts.get(cn, 0) + 1
+                future_cnt[cn] = future_cnt.get(cn, 0) + 1
 
         # Matrix calculation:  scores = W @ M → (n_cls,)
         scores = W @ M
@@ -385,7 +394,7 @@ def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) 
             float(scores[_cls_idx[c]]),                                       # weighted score
             (sum(raw_confs[c]) / len(raw_confs[c])) if raw_confs.get(c)       # mean raw conf
                 else 0.0,
-            fut_counts.get(c, 0),                                            # future evidence
+            future_cnt.get(c, 0),                                            # future evidence
             1 if last_resolved.get(tid) == c else 0,                         # stickiness
         ))
 
@@ -393,17 +402,37 @@ def _pred_buf_resolve(pred_buffer, snap_data: list, last_resolved: dict = None) 
         resolved_conf = (sum(r_confs) / len(r_confs)) if r_confs else 0.01
         resolved_conf = max(0.01, min(resolved_conf, 1.0))
 
-        alert_level = class_to_level(resolved_cls, resolved_conf)
+        base_level = _CLASS_LEVEL.get(resolved_cls.strip().lower(), 0)
 
-        # Gate A: dominance — drowning must hold ≥ MIN_DOMINANCE of total score
-        dominance = float(scores[_cls_idx[resolved_cls]]) / total
-        if alert_level >= 1 and dominance < MIN_DOMINANCE:
+        # ── 5-INPUT AND GATE ──────────────────────────────────────
+        # All 5 must be True for drowning (L1) to pass.
+        # If ANY is False, output is L0 (safe).
+        if base_level >= 1:
+            # G1: argmax — drowning already won class selection above
+            g2_conf_floor = resolved_conf >= DROWNING_CONF_MIN                # mean conf ≥ DROWNING_CONF_MIN
+            dominance     = float(scores[_cls_idx[resolved_cls]]) / total
+            g3_dominance  = dominance >= MIN_DOMINANCE                        # ≥ MIN_DOMINANCE of total score
+            g4_consec     = _consec.get(tid, 0) >= CONSEC_MIN_FRAMES          # ≥ CONSEC_MIN_FRAMES consecutive frames
+            g5_dual       = (present_cnt.get(resolved_cls, 0) >= 1            # in present region
+                             and future_cnt.get(resolved_cls, 0) >= 1)        # AND in future region
+
+            all_gates = (g2_conf_floor and g3_dominance and g4_consec and g5_dual)
+            prev_lvl = (last_resolved_lvl or {}).get(tid, 0)
+
+            if all_gates:
+                alert_level = 1
+            elif prev_lvl >= 1:
+                # Hysteresis: once L1, use relaxed exit thresholds to prevent flicker
+                still_dominant = dominance >= (MIN_DOMINANCE * EXIT_DOMINANCE_FRAC)
+                still_consec   = _consec.get(tid, 0) >= EXIT_CONSEC_MIN
+                alert_level = 1 if (still_dominant and still_consec) else 0
+            else:
+                alert_level = 0
+        else:
             alert_level = 0
 
-        # Gate B: consecutive-frame confirmation
-        if alert_level >= 1 and _consec.get(tid, 0) < CONSEC_MIN_FRAMES:
-            alert_level = 0
-
+        if last_resolved_lvl is not None:
+            last_resolved_lvl[tid] = alert_level
         last_resolved[tid] = resolved_cls
         result.append({
             'x1': sx1, 'y1': sy1, 'x2': sx2, 'y2': sy2,
@@ -450,7 +479,7 @@ def draw_boxes(frame, boxes, frame_alert_level=0, incident_box=None):
             color = (0, 0, 220)          # red — L2 EMERGENCY
             label = f"[L2] Drowning {d['conf']:.2f}"
         elif display_lvl == 1:
-            color = (0, 140, 255)        # orange — L1 Risky (>= 80% conf)
+            color = (0, 140, 255)        # orange — L1 Risky (>= 40% conf)
             label = f"[L1] Risky {d['conf']:.2f}"
         else:
             color = (255, 130, 0)        # blue — L0 Safe (swimming, floating, or low-conf drowning)
@@ -527,20 +556,13 @@ current_fps      = 0.0
 latest_detections = []   # consumed by /get_detections
 detection_history = []   # last 50 events (debounced)
 
-# --- Escalation state ---
-# Two-phase confirmation:
-#   confirm_start_time  : wall-clock time when continuous L1 detection began (None = no L1)
-#   drowning_start_time : wall-clock time when escalation timer STARTED (None = not confirmed)
-#   last_drowning_time  : wall-clock time of the most recent L1 displayed frame
-#   level2_triggered    : True once L2 alarm has fired (prevents repeat Telegram)
-#   level2_trigger_time : when L2 was first triggered (for countdown)
-#   incident_box        : (x1,y1,x2,y2) of the drowning person who triggered escalation
-confirm_start_time   = None
-drowning_start_time  = None
-last_drowning_time   = None
-level2_triggered     = False
-level2_trigger_time  = None
-incident_box         = None
+# Escalation state — all reset by _reset_state() on stream start/stop
+confirm_start_time   = None   # when continuous L1 began
+drowning_start_time  = None   # when escalation timer started (post-confirmation)
+last_drowning_time   = None   # most recent L1 display frame time
+level2_triggered     = False  # prevents duplicate Telegram sends
+level2_trigger_time  = None   # when L2 first fired (for countdown)
+incident_box         = None   # (x1,y1,x2,y2) of the person who triggered L2
 
 def _reset_state():
     """Clear all escalation state — called on stream start/stop."""
@@ -613,6 +635,7 @@ def generate_frames(source):
     raw_frame_buffer: deque = deque()     # (timestamp, pixel_frame, snap_data)
     pred_buffer: deque = deque(maxlen=PAST_FRAMES + PRESENT_FRAMES + FUTURE_FRAMES)
     last_resolved_cls = {}  # tid → last displayed class (stickiness tie-breaker)
+    last_resolved_lvl = {}  # tid → last alert level (hysteresis anti-flicker)
 
     while detection_active:
         ok, frame = cap.read()
@@ -696,7 +719,7 @@ def generate_frames(source):
             pop_ts, display_frame, snap_data = raw_frame_buffer.popleft()
             disp_now = time.time()
 
-            d_drawlist = _pred_buf_resolve(pred_buffer, snap_data, last_resolved_cls)
+            d_drawlist = _pred_buf_resolve(pred_buffer, snap_data, last_resolved_cls, last_resolved_lvl)
 
             d_max_lvl  = max((d['alert_level'] for d in d_drawlist), default=0)
             d_max_conf = max(
@@ -711,9 +734,9 @@ def generate_frames(source):
                     d_incident = (inc['x1'], inc['y1'], inc['x2'], inc['y2'])
 
             if d_max_lvl >= 1:
-                report_conf_ema = 0.60 * d_max_conf + 0.40 * report_conf_ema
+                report_conf_ema = 0.35 * d_max_conf + 0.65 * report_conf_ema
             else:
-                report_conf_ema = max(0.0, report_conf_ema - 0.02)
+                report_conf_ema = max(0.0, report_conf_ema - 0.01)
 
             # ---- Escalation state machine (two-phase confirmation) ----
             # Phase 1: L1 must be continuously detected for CONFIRM_SECONDS
@@ -735,8 +758,11 @@ def generate_frames(source):
                     print(f"[CONFIRMED] Drowning verified for {confirm_elapsed:.1f}s — "
                           f"escalation timer started (conf {d_max_conf:.2f})")
             else:
-                # L1 absent — break the continuous confirmation streak
-                confirm_start_time = None
+                # L1 absent — allow brief dropouts before breaking confirmation
+                if confirm_start_time is not None:
+                    dropout_s = disp_now - (last_drowning_time or disp_now)
+                    if dropout_s >= CONFIRM_DROPOUT_S:
+                        confirm_start_time = None
 
                 if last_drowning_time is not None \
                         and (disp_now - last_drowning_time) >= GRACE_TIME:
